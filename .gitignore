@@ -4,3 +4,5 @@ dataset/val/fake/*
 dataset/val/real/*
 __pycache__/
 *.pth
+*.tfevents.*
+opt.txt

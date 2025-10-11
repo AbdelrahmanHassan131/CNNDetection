@@ -2,7 +2,7 @@ import os
 import csv
 import torch
 
-from validate import validate
+from TrainModels.validate import validate
 from networks.resnet import resnet50
 from options.test_options import TestOptions
 from eval_config import *

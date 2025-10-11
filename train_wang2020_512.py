@@ -5,7 +5,7 @@ import torch
 import torch.nn
 import argparse
 from PIL import Image
-from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 
 from validate import validate
 from data import create_dataloader

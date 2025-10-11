@@ -12,25 +12,25 @@ class Wang2020_512_Trainer(BaseModel):
     def __init__(self, opt):
         super(Wang2020_512_Trainer, self).__init__(opt)
 
+        pretrained_flag = self.isTrain and not opt.continue_train
+        self.model = resnet50(pretrained=pretrained_flag)
+
+        # EDIT HERE 👇
+        # Final FC becomes: 2048 -> 512 -> 1
+        self.model.fc = nn.Sequential(
+            nn.Linear(2048, 512),  # First layer to get embeddings
+            nn.ReLU(),             # Optional but recommended
+            nn.Linear(512, 1)      # Final layer for binary classification
+        )
         if self.isTrain and not opt.continue_train:
-            self.model = resnet50(pretrained=True)
-
-            # EDIT HERE 👇
-            # Final FC becomes: 2048 -> 512 -> 1
-            self.model.fc = nn.Sequential(
-                nn.Linear(2048, 512),  # First layer to get embeddings
-                nn.ReLU(),             # Optional but recommended
-                nn.Linear(512, 1)      # Final layer for binary classification
-            )
-
             # Initialize both layers
             torch.nn.init.normal_(
                 self.model.fc[0].weight.data, 0.0, opt.init_gain)
             torch.nn.init.normal_(
                 self.model.fc[2].weight.data, 0.0, opt.init_gain)
 
-        if not self.isTrain or opt.continue_train:
-            self.model = resnet50(num_classes=1)
+        # if not self.isTrain or opt.continue_train:
+        #     self.model = resnet50(num_classes=1)
 
         if self.isTrain:
             self.loss_fn = nn.BCEWithLogitsLoss()
@@ -46,6 +46,7 @@ class Wang2020_512_Trainer(BaseModel):
 
         if not self.isTrain or opt.continue_train:
             self.load_networks(opt.epoch)
+
         self.model.to(opt.gpu_ids[0])
 
     def adjust_learning_rate(self, min_lr=1e-6):
