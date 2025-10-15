@@ -33,6 +33,7 @@ def get_val_opt():
 
 
 if __name__ == '__main__':
+    torch.backends.cudnn.benchmark = True
     opt = TrainOptions().parse()
     opt.dataroot = f"{opt.dataroot}/{opt.train_split}/"
     val_opt = get_val_opt()
@@ -40,7 +41,7 @@ if __name__ == '__main__':
     # === DATA LOADER ===
     data_loader = create_dataloader(opt)
     dataset_size = len(data_loader)
-    print(f"#training images = {dataset_size}")
+    print(f"# Training images = {dataset_size}")
 
     # === LOGGING ===
     train_writer = SummaryWriter(os.path.join(
@@ -51,12 +52,17 @@ if __name__ == '__main__':
     # === MODEL ===
     model = FFT_512_Trainer(opt)
     early_stopping = EarlyStopping(
-        patience=opt.earlystop_epoch, delta=-0.001, verbose=True)
+        patience=opt.earlystop_epoch, delta=-0.001, verbose=True
+    )
+
+    print(f"🚀 Starting FFT-based training for {opt.niter} epochs...\n")
 
     for epoch in range(opt.niter):
         epoch_start_time = time.time()
         epoch_iter = 0
-        print(f"\n--- Epoch {epoch+1}/{opt.niter} ---")
+        print(f"\n--- Epoch {epoch + 1}/{opt.niter} ---")
+
+        model.train()
 
         for i, data in enumerate(data_loader):
             model.total_steps += 1
@@ -70,6 +76,7 @@ if __name__ == '__main__':
                 print("⛔ Stopping training. Please fix the problematic data.")
                 sys.exit(1)
 
+            # === TRAIN STEP ===
             model.optimize_parameters()
 
             if model.total_steps % opt.loss_freq == 0:
@@ -77,34 +84,47 @@ if __name__ == '__main__':
                     f"Train loss: {model.loss:.6f} at step: {model.total_steps}")
                 train_writer.add_scalar('loss', model.loss, model.total_steps)
 
+            # === SAVE LATEST MODEL ===
             if model.total_steps % opt.save_latest_freq == 0:
                 print(
-                    f"Saving latest model (epoch {epoch}, step {model.total_steps})")
+                    f"💾 Saving latest model (epoch {epoch}, step {model.total_steps})")
                 model.save_networks('latest')
 
-        # Save model at epoch end
+        # === SAVE MODEL AT EPOCH END ===
         if epoch % opt.save_epoch_freq == 0:
             print(
-                f"Saving model checkpoint at end of epoch {epoch}, step {model.total_steps}")
+                f"💾 Saving checkpoint at end of epoch {epoch}, step {model.total_steps}")
             model.save_networks('latest')
             model.save_networks(epoch)
 
         # === VALIDATION ===
         model.eval()
-        acc, ap = validate(model.model, val_opt)[:2]
+        try:
+            acc, ap = validate(model.model, val_opt)[:2]
+        except Exception as e:
+            print(f"⚠️ Validation failed at epoch {epoch}: {e}")
+            continue
+
         val_writer.add_scalar('accuracy', acc, model.total_steps)
         val_writer.add_scalar('ap', ap, model.total_steps)
-        print(f"(Val @ epoch {epoch}) acc: {acc}; ap: {ap}")
+        print(f"(Val @ epoch {epoch}) acc: {acc:.6f}; ap: {ap:.6f}")
 
+        # === EARLY STOPPING ===
         early_stopping(acc, model)
         if early_stopping.early_stop:
             cont_train = model.adjust_learning_rate()
             if cont_train:
-                print("Learning rate dropped by 10, continuing training...")
+                print("📉 Learning rate dropped by 10 — continuing training...")
                 early_stopping = EarlyStopping(
-                    patience=opt.earlystop_epoch, delta=-0.002, verbose=True)
+                    patience=opt.earlystop_epoch, delta=-0.002, verbose=True
+                )
             else:
-                print("Early stopping triggered — ending training.")
+                print("🛑 Early stopping triggered — ending training.")
                 break
 
-        model.train()
+        print(
+            f"⏱️ Epoch {epoch + 1} finished in {(time.time() - epoch_start_time):.2f}s")
+
+    print("\n✅ Training completed successfully.")
+    train_writer.close()
+    val_writer.close()
