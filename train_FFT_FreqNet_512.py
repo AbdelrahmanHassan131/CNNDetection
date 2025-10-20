@@ -7,7 +7,7 @@ from torch.utils.tensorboard import SummaryWriter
 from validate import validate
 from data import create_dataloader
 from earlystop import EarlyStopping
-from networks.FrequencyModels.FFT_512_Trainer_Scratch import FFT_512_Trainer
+from networks.FrequencyModels.FFT_512_Trainer_FreqNet import FFT_512_Trainer_WithFreqNet as FFT_512_Trainer
 from options.train_options import TrainOptions
 
 
@@ -52,10 +52,9 @@ if __name__ == '__main__':
     # === MODEL ===
     model = FFT_512_Trainer(opt)
     early_stopping = EarlyStopping(
-        patience=opt.earlystop_epoch, delta=-0.001, verbose=True
-    )
+        patience=opt.earlystop_epoch, delta=-0.001, verbose=True)
 
-    print(f"🚀 Starting FFT-based training for {opt.niter} epochs...\n")
+    print(f"🚀 Starting FreqNet-FFT training for {opt.niter} epochs...\n")
 
     for epoch in range(opt.niter):
         epoch_start_time = time.time()
@@ -100,7 +99,7 @@ if __name__ == '__main__':
         # === VALIDATION ===
         model.eval()
         try:
-            acc, ap = validate(model.model, val_opt)[:2]
+            acc, ap = validate(model.backbone, val_opt)[:2]
         except Exception as e:
             print(f"⚠️ Validation failed at epoch {epoch}: {e}")
             continue
@@ -116,8 +115,7 @@ if __name__ == '__main__':
             if cont_train:
                 print("📉 Learning rate dropped by 10 — continuing training...")
                 early_stopping = EarlyStopping(
-                    patience=opt.earlystop_epoch, delta=-0.002, verbose=True
-                )
+                    patience=opt.earlystop_epoch, delta=-0.002, verbose=True)
             else:
                 print("🛑 Early stopping triggered — ending training.")
                 break

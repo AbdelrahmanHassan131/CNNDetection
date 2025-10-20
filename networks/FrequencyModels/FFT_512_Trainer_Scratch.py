@@ -4,7 +4,7 @@ import functools
 import torch
 import torch.nn as nn
 from networks.base_model import BaseModel, init_weights
-from .FFTNET import FFTNet        # the new model above
+from .FFTNET_Scratch import FFTNet        # the new model above
 import torchvision.utils as vutils
 
 
