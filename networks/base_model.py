@@ -19,7 +19,7 @@ class BaseModel(nn.Module):
     def save_networks(self, epoch):
         save_filename = 'model_epoch_%s.pth' % epoch
         save_path = os.path.join(self.save_dir, save_filename)
-
+        os.makedirs(self.save_dir, exist_ok=True)
         # serialize model and optimizer to dict
         state_dict = {
             'model': self.model.state_dict(),
@@ -33,6 +33,8 @@ class BaseModel(nn.Module):
     def load_networks(self, epoch):
         load_filename = 'model_epoch_%s.pth' % epoch
         load_path = os.path.join(self.save_dir, load_filename)
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(f"Checkpoint not found: {load_path}")
 
         print('loading the model from %s' % load_path)
         # if you are using PyTorch newer than 0.4 (e.g., built from
