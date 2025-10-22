@@ -6,3 +6,4 @@ __pycache__/
 *.pth
 *.tfevents.*
 opt.txt
+!4-classes-freqnet-v2.pth
