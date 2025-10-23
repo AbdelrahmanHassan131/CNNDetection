@@ -15,12 +15,12 @@ class FFT_512_Trainer_WithFreqNet(BaseModel):
 
         # === Backbone: FreqNet ===
         self.backbone = FreqNet(num_classes=4)
-
-        # === Load pretrained weights ===
-        checkpoint_path = "networks/FrequencyModels/FreqNet/FreqNet_DeepfakeDetection/4-classes-freqnet-v2.pth"
-        checkpoint = torch.load(
-            checkpoint_path, map_location=device, weights_only=True)
-        self.backbone.load_state_dict(checkpoint, strict=False)
+        if not self.isTrain or opt.continue_train:
+            # === Load pretrained weights ===
+            checkpoint_path = "networks/FrequencyModels/FreqNet/FreqNet_DeepfakeDetection/4-classes-freqnet-v2.pth"
+            checkpoint = torch.load(
+                checkpoint_path, map_location=device, weights_only=True)
+            self.backbone.load_state_dict(checkpoint, strict=False)
 
         self.backbone = self.backbone.to(device)
 
