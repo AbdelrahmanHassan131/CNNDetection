@@ -5,12 +5,29 @@ import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
 from random import random, choice
 from io import BytesIO
-from PIL import Image
-from PIL import ImageFile
+from PIL import Image, ImageFile
 from scipy.ndimage.filters import gaussian_filter
 
-
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+# ----------------------------
+# Helper functions (replacing lambdas)
+# ----------------------------
+
+def identity_transform(img):
+    """Return the image unchanged."""
+    return img
+
+
+def apply_data_augment(img, opt):
+    """Wrapper for data_augment to make it pickle-safe."""
+    return data_augment(img, opt)
+
+
+# ----------------------------
+# Dataset creation
+# ----------------------------
 
 def dataset_folder(opt, root):
     if opt.mode == 'binary':
@@ -20,33 +37,46 @@ def dataset_folder(opt, root):
     raise ValueError('opt.mode needs to be binary or filename.')
 
 
+def resize_with_opt(img, opt):
+    return custom_resize(img, opt)
+
+
+def augment_with_opt(img, opt):
+    return data_augment(img, opt)
+
+
 def binary_dataset(opt, root):
     if opt.isTrain:
         crop_func = transforms.RandomCrop(opt.cropSize)
     elif opt.no_crop:
-        crop_func = transforms.Lambda(lambda img: img)
+        crop_func = transforms.Lambda(identity_transform)
     else:
         crop_func = transforms.CenterCrop(opt.cropSize)
 
     if opt.isTrain and not opt.no_flip:
         flip_func = transforms.RandomHorizontalFlip()
     else:
-        flip_func = transforms.Lambda(lambda img: img)
+        flip_func = transforms.Lambda(identity_transform)
+
     if not opt.isTrain and opt.no_resize:
-        rz_func = transforms.Lambda(lambda img: img)
+        rz_func = transforms.Lambda(identity_transform)
     else:
-        rz_func = transforms.Lambda(lambda img: custom_resize(img, opt))
+        # ✅ now passing partial function that captures opt safely
+        from functools import partial
+        rz_func = transforms.Lambda(partial(resize_with_opt, opt=opt))
 
     dset = datasets.ImageFolder(
-            root,
-            transforms.Compose([
-                rz_func,
-                transforms.Lambda(lambda img: data_augment(img, opt)),
-                crop_func,
-                flip_func,
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ]))
+        root,
+        transforms.Compose([
+            rz_func,
+            transforms.Lambda(partial(augment_with_opt, opt=opt)),
+            crop_func,
+            flip_func,
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+    )
     return dset
 
 
@@ -59,10 +89,13 @@ class FileNameDataset(datasets.ImageFolder):
         super().__init__(root)
 
     def __getitem__(self, index):
-        # Loading sample
         path, target = self.samples[index]
         return path
 
+
+# ----------------------------
+# Data augmentation utilities
+# ----------------------------
 
 def data_augment(img, opt):
     img = np.array(img)
@@ -95,17 +128,17 @@ def sample_discrete(s):
 
 
 def gaussian_blur(img, sigma):
-    gaussian_filter(img[:,:,0], output=img[:,:,0], sigma=sigma)
-    gaussian_filter(img[:,:,1], output=img[:,:,1], sigma=sigma)
-    gaussian_filter(img[:,:,2], output=img[:,:,2], sigma=sigma)
+    gaussian_filter(img[:, :, 0], output=img[:, :, 0], sigma=sigma)
+    gaussian_filter(img[:, :, 1], output=img[:, :, 1], sigma=sigma)
+    gaussian_filter(img[:, :, 2], output=img[:, :, 2], sigma=sigma)
 
 
 def cv2_jpg(img, compress_val):
-    img_cv2 = img[:,:,::-1]
+    img_cv2 = img[:, :, ::-1]
     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), compress_val]
-    result, encimg = cv2.imencode('.jpg', img_cv2, encode_param)
+    _, encimg = cv2.imencode('.jpg', img_cv2, encode_param)
     decimg = cv2.imdecode(encimg, 1)
-    return decimg[:,:,::-1]
+    return decimg[:, :, ::-1]
 
 
 def pil_jpg(img, compress_val):
@@ -113,22 +146,27 @@ def pil_jpg(img, compress_val):
     img = Image.fromarray(img)
     img.save(out, format='jpeg', quality=compress_val)
     img = Image.open(out)
-    # load from memory before ByteIO closes
     img = np.array(img)
     out.close()
     return img
 
 
 jpeg_dict = {'cv2': cv2_jpg, 'pil': pil_jpg}
+
+
 def jpeg_from_key(img, compress_val, key):
     method = jpeg_dict[key]
     return method(img, compress_val)
 
 
-rz_dict = {'bilinear': Image.BILINEAR,
-           'bicubic': Image.BICUBIC,
-           'lanczos': Image.LANCZOS,
-           'nearest': Image.NEAREST}
+rz_dict = {
+    'bilinear': Image.BILINEAR,
+    'bicubic': Image.BICUBIC,
+    'lanczos': Image.LANCZOS,
+    'nearest': Image.NEAREST
+}
+
+
 def custom_resize(img, opt):
     interp = sample_discrete(opt.rz_interp)
     return TF.resize(img, opt.loadSize, interpolation=rz_dict[interp])
