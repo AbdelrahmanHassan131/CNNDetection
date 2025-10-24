@@ -1,4 +1,3 @@
-# from pix2pix
 import os
 import torch
 import torch.nn as nn
@@ -13,8 +12,17 @@ class BaseModel(nn.Module):
         self.total_steps = 0
         self.isTrain = True
         self.save_dir = os.path.join(opt.checkpoints_dir, opt.name)
-        self.device = torch.device('cuda:{}'.format(
-            opt.gpu_ids[0])) if opt.gpu_ids else torch.device('cpu')
+
+        if torch.cuda.is_available() and len(opt.gpu_ids) > 0:
+            self.device = torch.device(f'cuda:{opt.gpu_ids[0]}')
+        else:
+            self.device = torch.device('cpu')
+
+        if hasattr(self, 'model'):
+            self.model.to(self.device)
+            if len(opt.gpu_ids) > 1 and torch.cuda.device_count() > 1:
+                self.model = nn.DataParallel(
+                    self.model, device_ids=opt.gpu_ids)
 
     def save_networks(self, epoch):
         save_filename = 'model_epoch_%s.pth' % epoch
@@ -22,7 +30,7 @@ class BaseModel(nn.Module):
         os.makedirs(self.save_dir, exist_ok=True)
         # serialize model and optimizer to dict
         state_dict = {
-            'model': self.model.state_dict(),
+            'model': (self.model.module if isinstance(self.model, nn.DataParallel) else self.model).state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'total_steps': self.total_steps,
         }
@@ -31,29 +39,35 @@ class BaseModel(nn.Module):
 
     # load models from the disk
     def load_networks(self, epoch):
-        load_filename = 'model_epoch_%s.pth' % epoch
+        load_filename = f'model_epoch_{epoch}.pth'
         load_path = os.path.join(self.save_dir, load_filename)
         if not os.path.exists(load_path):
             raise FileNotFoundError(f"Checkpoint not found: {load_path}")
 
-        print('loading the model from %s' % load_path)
-        # if you are using PyTorch newer than 0.4 (e.g., built from
-        # GitHub source), you can remove str() on self.device
+        print(f'loading the model from {load_path}')
         state_dict = torch.load(load_path, map_location=self.device)
         if hasattr(state_dict, '_metadata'):
             del state_dict._metadata
 
-        self.model.load_state_dict(state_dict['model'])
-        self.total_steps = state_dict['total_steps']
+        model_state = state_dict['model']
 
-        if self.isTrain and not self.opt.new_optim:
+        # 🧩 Handle models saved with or without DataParallel
+        from collections import OrderedDict
+        new_state_dict = OrderedDict()
+        for k, v in model_state.items():
+            name = k.replace('module.', '') if k.startswith('module.') else k
+            new_state_dict[name] = v
+
+        self.model.load_state_dict(new_state_dict, strict=False)
+        self.total_steps = state_dict.get('total_steps', 0)
+
+        # 🧠 Only load optimizer state if we are continuing training
+        if self.isTrain and not self.opt.new_optim and 'optimizer' in state_dict:
             self.optimizer.load_state_dict(state_dict['optimizer'])
-            # move optimizer state to GPU
             for state in self.optimizer.state.values():
                 for k, v in state.items():
                     if torch.is_tensor(v):
                         state[k] = v.to(self.device)
-
             for g in self.optimizer.param_groups:
                 g['lr'] = self.opt.lr
 
@@ -77,14 +91,9 @@ def init_weights(net, init_type='normal', gain=0.02):
                 init.kaiming_normal_(m.weight.data, a=0, mode='fan_in')
             elif init_type == 'orthogonal':
                 init.orthogonal_(m.weight.data, gain=gain)
-            else:
-                raise NotImplementedError(
-                    'initialization method [%s] is not implemented' % init_type)
             if hasattr(m, 'bias') and m.bias is not None:
                 init.constant_(m.bias.data, 0.0)
         elif classname.find('BatchNorm2d') != -1:
             init.normal_(m.weight.data, 1.0, gain)
             init.constant_(m.bias.data, 0.0)
-
-    print('initialize network with %s' % init_type)
     net.apply(init_func)

@@ -88,6 +88,7 @@ if __name__ == '__main__':
                 print(
                     f"💾 Saving latest model (epoch {epoch}, step {model.total_steps})")
                 model.save_networks('latest')
+                model.eval()
 
         # === SAVE MODEL AT EPOCH END ===
         if epoch % opt.save_epoch_freq == 0:

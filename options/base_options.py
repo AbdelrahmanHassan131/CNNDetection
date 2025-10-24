@@ -42,7 +42,7 @@ class BaseOptions():
                             help='which epoch to load? set to latest to use latest cached model')
         parser.add_argument('--num_threads', default=4,
                             type=int, help='# threads for loading data')
-        parser.add_argument('--checkpoints_dir', type=str, default='/content/drive/MyDrive/checkpoints',
+        parser.add_argument('--checkpoints_dir', type=str, default='/kaggle/working/checkpoints',
                             help='models are saved here (Google Drive path)')
         parser.add_argument('--serial_batches', action='store_true',
                             help='if true, takes images in order to make batches, otherwise takes them randomly')
