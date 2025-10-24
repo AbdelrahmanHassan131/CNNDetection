@@ -88,7 +88,6 @@ if __name__ == '__main__':
                 print(
                     f"💾 Saving latest model (epoch {epoch}, step {model.total_steps})")
                 model.save_networks('latest')
-                model.eval()
 
         # === SAVE MODEL AT EPOCH END ===
         if epoch % opt.save_epoch_freq == 0:
@@ -96,6 +95,16 @@ if __name__ == '__main__':
                 f"💾 Saving checkpoint at end of epoch {epoch}, step {model.total_steps}")
             model.save_networks('latest')
             model.save_networks(epoch)
+            model.eval()
+            try:
+                acc, ap = validate(model.backbone, val_opt)[:2]
+            except Exception as e:
+                print(f"⚠️ Validation failed at epoch {epoch}: {e}")
+                continue
+
+            val_writer.add_scalar('accuracy', acc, model.total_steps)
+            val_writer.add_scalar('ap', ap, model.total_steps)
+            print(f"(Val @ epoch {epoch}) acc: {acc:.6f}; ap: {ap:.6f}")
 
         # === VALIDATION ===
         model.eval()
