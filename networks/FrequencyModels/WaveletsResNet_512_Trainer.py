@@ -122,7 +122,11 @@ class Wavelet_ResNet_Trainer(BaseModel):
             nn.init.zeros_(self.new_head[4].bias)
 
             # 🆕 CRITICAL FIX: Use BCEWithLogitsLoss with pos_weight for class imbalance
+            # We'll compute actual pos_weight after seeing some data
             self.loss_fn = nn.BCEWithLogitsLoss()
+            self.use_weighted_loss = opt.class_bal if hasattr(
+                opt, 'class_bal') else False
+            self.pos_weight_computed = False
 
             # 🆕 CRITICAL FIX: Much lower learning rate + weight decay
             self.optimizer = torch.optim.Adam(
@@ -185,10 +189,26 @@ class Wavelet_ResNet_Trainer(BaseModel):
         return self.model(x)
 
     # =========================
-    # Training step (IMPROVED)
+    # Training step (IMPROVED + WEIGHTED LOSS)
     # =========================
     def optimize_parameters(self):
         self.model.train()
+
+        # 🆕 ADDED: Compute pos_weight after first few batches
+        if self.use_weighted_loss and not self.pos_weight_computed and hasattr(self, '_label_counter'):
+            total = self._label_counter['0'] + self._label_counter['1']
+            if total > 1000:  # Wait for 1000 samples
+                n_neg = self._label_counter['0']
+                n_pos = self._label_counter['1']
+                if n_pos > 0 and n_neg > 0:
+                    pos_weight = torch.tensor([n_neg / n_pos]).to(self.device)
+                    self.loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+                    print(f"\n🎯 Class balancing enabled!")
+                    print(f"   Fake (0): {n_neg} samples")
+                    print(f"   Real (1): {n_pos} samples")
+                    print(f"   Pos weight: {pos_weight.item():.4f}\n")
+                    self.pos_weight_computed = True
+
         logits = self.forward(self.input)
         loss = self.loss_fn(logits.squeeze(1), self.label)
 
