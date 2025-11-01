@@ -28,16 +28,20 @@ class BaseModel(nn.Module):
         save_filename = 'model_epoch_%s.pth' % epoch
         save_path = os.path.join(self.save_dir, save_filename)
         os.makedirs(self.save_dir, exist_ok=True)
-        # serialize model and optimizer to dict
+
+        # 🆕 ADDED: Save scheduler state if it exists
         state_dict = {
             'model': (self.model.module if isinstance(self.model, nn.DataParallel) else self.model).state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'total_steps': self.total_steps,
         }
 
+        # Save scheduler state if it exists
+        if hasattr(self, 'scheduler'):
+            state_dict['scheduler'] = self.scheduler.state_dict()
+
         torch.save(state_dict, save_path)
 
-    # load models from the disk
     def load_networks(self, epoch):
         load_filename = f'model_epoch_{epoch}.pth'
         load_path = os.path.join(self.save_dir, load_filename)
@@ -51,7 +55,7 @@ class BaseModel(nn.Module):
 
         model_state = state_dict['model']
 
-        # 🧩 Handle models saved with or without DataParallel
+        # Handle models saved with or without DataParallel
         from collections import OrderedDict
         new_state_dict = OrderedDict()
         for k, v in model_state.items():
@@ -61,7 +65,7 @@ class BaseModel(nn.Module):
         self.model.load_state_dict(new_state_dict, strict=False)
         self.total_steps = state_dict.get('total_steps', 0)
 
-        # 🧠 Only load optimizer state if we are continuing training
+        # Only load optimizer state if we are continuing training
         if self.isTrain and not self.opt.new_optim and 'optimizer' in state_dict:
             self.optimizer.load_state_dict(state_dict['optimizer'])
             for state in self.optimizer.state.values():
@@ -70,6 +74,10 @@ class BaseModel(nn.Module):
                         state[k] = v.to(self.device)
             for g in self.optimizer.param_groups:
                 g['lr'] = self.opt.lr
+
+        # 🆕 ADDED: Load scheduler state if it exists
+        if self.isTrain and hasattr(self, 'scheduler') and 'scheduler' in state_dict:
+            self.scheduler.load_state_dict(state_dict['scheduler'])
 
     def eval(self):
         self.model.eval()

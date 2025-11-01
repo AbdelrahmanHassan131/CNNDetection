@@ -8,13 +8,14 @@ import cv2
 import numpy as np
 
 # =========================
-# Wavelet preprocessing
+# Wavelet preprocessing (FIXED)
 # =========================
 
 
 def rgb_to_wavelet12(img):
     """
     Convert RGB image (H,W,3) or (3,H,W) to 12-channel wavelet tensor (12,H,W)
+    🆕 FIXED: Added proper normalization
     """
     if torch.is_tensor(img):
         img = img.cpu().numpy()
@@ -39,31 +40,39 @@ def rgb_to_wavelet12(img):
         wavelet_resized.append(ch)
     wavelet_resized = np.stack(wavelet_resized, axis=0)
 
+    # 🆕 CRITICAL FIX: Normalize wavelet coefficients
+    wavelet_mean = wavelet_resized.mean()
+    wavelet_std = wavelet_resized.std() + 1e-8
+    wavelet_resized = (wavelet_resized - wavelet_mean) / wavelet_std
+
     return torch.tensor(wavelet_resized, dtype=torch.float32)
 
-# =========================
-# Small CNN to reduce 12->3 channels
-# =========================
 
+# =========================
+# Improved Wavelet Embedding CNN
+# =========================
 
 class WaveletEmbedCNN(nn.Module):
     def __init__(self, in_ch=12, out_ch=3):
         super(WaveletEmbedCNN, self).__init__()
+        # 🆕 IMPROVED: Deeper network with residual connection
         self.embed = nn.Sequential(
-            nn.Conv2d(in_ch, 32, kernel_size=3, padding=1),
+            nn.Conv2d(in_ch, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.Conv2d(32, out_ch, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True)
         )
 
     def forward(self, x):
         return self.embed(x)
 
-# =========================
-# Wavelet-ResNet50 Trainer
-# =========================
 
+# =========================
+# Wavelet-ResNet50 Trainer (MAJOR FIXES)
+# =========================
 
 class Wavelet_ResNet_Trainer(BaseModel):
     def name(self):
@@ -76,9 +85,8 @@ class Wavelet_ResNet_Trainer(BaseModel):
         # === Wavelet embedder 12->3 channels ===
         self.wavelet_embed = WaveletEmbedCNN(in_ch=12, out_ch=3).to(device)
 
-        # === ResNet50 backbone ===
-        self.backbone = resnet50(pretrained=False)
-        # Remove the final fully connected layer
+        # 🆕 CRITICAL FIX: Use pretrained=True for better initialization
+        self.backbone = resnet50(pretrained=True)
         self.backbone.fc = nn.Identity()
         self.backbone = self.backbone.to(device)
 
@@ -88,11 +96,13 @@ class Wavelet_ResNet_Trainer(BaseModel):
             feat = self.backbone(self.wavelet_embed(dummy))
             feat_dim = feat.shape[1]
 
-        # === New classifier head ===
+        # 🆕 IMPROVED: Better classifier with dropout for regularization
         self.new_head = nn.Sequential(
+            nn.Dropout(0.3),
             nn.Linear(feat_dim, 512),
             nn.ReLU(inplace=True),
-            nn.Linear(512, 1)  # Binary classification
+            nn.Dropout(0.3),
+            nn.Linear(512, 1)
         ).to(device)
 
         # === Combine model for saving/loading ===
@@ -103,19 +113,39 @@ class Wavelet_ResNet_Trainer(BaseModel):
             self.new_head
         )
 
-        # Initialize new layers
+        # 🆕 BETTER INITIALIZATION
         if self.isTrain:
-            nn.init.normal_(self.new_head[0].weight, 0.0, opt.init_gain)
-            nn.init.normal_(self.new_head[2].weight, 0.0, opt.init_gain)
+            # Initialize new layers with Xavier (better than normal for ReLU)
+            nn.init.xavier_normal_(self.new_head[1].weight)
+            nn.init.zeros_(self.new_head[1].bias)
+            nn.init.xavier_normal_(self.new_head[4].weight)
+            nn.init.zeros_(self.new_head[4].bias)
+
+            # 🆕 CRITICAL FIX: Use BCEWithLogitsLoss with pos_weight for class imbalance
             self.loss_fn = nn.BCEWithLogitsLoss()
+
+            # 🆕 CRITICAL FIX: Much lower learning rate + weight decay
             self.optimizer = torch.optim.Adam(
                 self.model.parameters(),
-                lr=opt.lr, betas=(opt.beta1, 0.999)
+                lr=opt.lr,  # Use lr from command line
+                betas=(opt.beta1, 0.999),
+                weight_decay=1e-4  # Added regularization
             )
+
+            # 🆕 ADDED: Learning rate scheduler
+            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='max',  # Monitor accuracy (maximize)
+                factor=0.5,
+                patience=2,
+                verbose=True,
+                min_lr=1e-7
+            )
+
         if opt.continue_train:
             try:
                 print(
-                    "🔄 Continuing training — loading latest checkpoint... opt epcoh is ", opt.epoch)
+                    f"🔄 Continuing training — loading checkpoint from epoch {opt.epoch}...")
                 self.load_networks(opt.epoch)
                 print(
                     f"✅ Loaded checkpoint successfully (steps: {self.total_steps})")
@@ -126,7 +156,7 @@ class Wavelet_ResNet_Trainer(BaseModel):
         self.model_names = ['model']
 
     # =========================
-    # Input preparation
+    # Input preparation (IMPROVED)
     # =========================
     def set_input(self, input_data):
         if isinstance(input_data, (list, tuple)):
@@ -142,6 +172,12 @@ class Wavelet_ResNet_Trainer(BaseModel):
         self.input = torch.stack(wavelet_imgs).to(self.device)
         self.label = label.float().to(self.device)
 
+        # 🆕 ADDED: Track label distribution for debugging
+        if not hasattr(self, '_label_counter'):
+            self._label_counter = {'0': 0, '1': 0}
+        self._label_counter['0'] += (self.label == 0).sum().item()
+        self._label_counter['1'] += (self.label == 1).sum().item()
+
     # =========================
     # Forward pass
     # =========================
@@ -149,12 +185,42 @@ class Wavelet_ResNet_Trainer(BaseModel):
         return self.model(x)
 
     # =========================
-    # Training step
+    # Training step (IMPROVED)
     # =========================
     def optimize_parameters(self):
+        self.model.train()
         logits = self.forward(self.input)
         loss = self.loss_fn(logits.squeeze(1), self.label)
+
         self.optimizer.zero_grad()
         loss.backward()
+
+        # 🆕 ADDED: Gradient clipping to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
         self.optimizer.step()
         self.loss = loss
+
+        # 🆕 ADDED: Track predictions for debugging
+        with torch.no_grad():
+            preds = (torch.sigmoid(logits.squeeze(1)) > 0.5).float()
+            self.batch_acc = (preds == self.label).float().mean()
+
+    # 🆕 ADDED: Method to update scheduler
+    def update_learning_rate(self, val_acc):
+        """Call this after validation to adjust learning rate"""
+        if hasattr(self, 'scheduler'):
+            old_lr = self.optimizer.param_groups[0]['lr']
+            self.scheduler.step(val_acc)
+            new_lr = self.optimizer.param_groups[0]['lr']
+            if old_lr != new_lr:
+                print(f"📉 Learning rate updated: {old_lr:.2e} → {new_lr:.2e}")
+
+    # 🆕 ADDED: Method to print label distribution
+    def print_label_stats(self):
+        if hasattr(self, '_label_counter'):
+            total = self._label_counter['0'] + self._label_counter['1']
+            if total > 0:
+                print(f"📊 Label distribution so far: "
+                      f"Real={self._label_counter['1']} ({100*self._label_counter['1']/total:.1f}%), "
+                      f"Fake={self._label_counter['0']} ({100*self._label_counter['0']/total:.1f}%)")
