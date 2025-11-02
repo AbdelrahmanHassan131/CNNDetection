@@ -2,7 +2,6 @@ import os
 import torch
 import torch.nn as nn
 from torch.nn import init
-from torch.optim import lr_scheduler
 
 
 class BaseModel(nn.Module):
@@ -14,30 +13,42 @@ class BaseModel(nn.Module):
         self.save_dir = os.path.join(opt.checkpoints_dir, opt.name)
 
         # Set device
-        if torch.cuda.is_available() and len(opt.gpu_ids) > 0:
+        if torch.cuda.is_available() and getattr(opt, 'gpu_ids', None) and len(opt.gpu_ids) > 0:
             self.device = torch.device(f'cuda:{opt.gpu_ids[0]}')
             print(f"🎮 Using GPU {opt.gpu_ids[0]} as primary device")
         else:
             self.device = torch.device('cpu')
             print("⚠️ Using CPU (no GPU available)")
 
+    def to_device(self, x, non_blocking=True):
+        """Move tensor or dict/list of tensors to model device safely."""
+        if torch.is_tensor(x):
+            return x.to(self.device, non_blocking=non_blocking)
+        if isinstance(x, dict):
+            return {k: self.to_device(v, non_blocking=non_blocking) for k, v in x.items()}
+        if isinstance(x, (list, tuple)):
+            return type(x)(self.to_device(v, non_blocking=non_blocking) for v in x)
+        return x
+
     def save_networks(self, epoch):
-        save_filename = 'model_epoch_%s.pth' % epoch
-        save_path = os.path.join(self.save_dir, save_filename)
         os.makedirs(self.save_dir, exist_ok=True)
+        save_filename = f'model_epoch_{epoch}.pth'
+        save_path = os.path.join(self.save_dir, save_filename)
 
-        # Handle DataParallel models correctly
-        state_dict = {
-            'model': (self.model.module if isinstance(self.model, nn.DataParallel) else self.model).state_dict(),
-            'optimizer': self.optimizer.state_dict(),
+        # Extract state dict (handle DataParallel)
+        model_obj = self.model.module if isinstance(
+            self.model, nn.DataParallel) else self.model
+        state = {
+            'model_state': model_obj.state_dict(),
+            'optimizer_state': self.optimizer.state_dict() if hasattr(self, 'optimizer') else None,
             'total_steps': self.total_steps,
+            'opt': vars(self.opt) if hasattr(self, 'opt') else None
         }
-
-        # Save scheduler state if it exists
         if hasattr(self, 'scheduler'):
-            state_dict['scheduler'] = self.scheduler.state_dict()
+            state['scheduler_state'] = self.scheduler.state_dict()
 
-        torch.save(state_dict, save_path)
+        torch.save(state, save_path)
+        print(f"💾 Saved checkpoint: {save_path}")
 
     def load_networks(self, epoch):
         load_filename = f'model_epoch_{epoch}.pth'
@@ -45,44 +56,46 @@ class BaseModel(nn.Module):
         if not os.path.exists(load_path):
             raise FileNotFoundError(f"Checkpoint not found: {load_path}")
 
-        print(f'loading the model from {load_path}')
-        state_dict = torch.load(load_path, map_location=self.device)
-        if hasattr(state_dict, '_metadata'):
-            del state_dict._metadata
+        print(f'🔄 loading the model from {load_path}')
+        state = torch.load(load_path, map_location=self.device)
 
-        model_state = state_dict['model']
+        model_state = state.get('model_state', None)
+        if model_state is None:
+            raise KeyError("Checkpoint missing 'model_state' key")
 
-        # Handle models saved with or without DataParallel
-        from collections import OrderedDict
-        new_state_dict = OrderedDict()
+        # strip 'module.' if necessary
+        new_state = {}
         for k, v in model_state.items():
-            # Remove 'module.' prefix if exists
             name = k.replace('module.', '') if k.startswith('module.') else k
-            new_state_dict[name] = v
+            new_state[name] = v
 
-        # Load into correct model (with or without DataParallel)
-        if isinstance(self.model, nn.DataParallel):
-            self.model.module.load_state_dict(new_state_dict, strict=False)
-        else:
-            self.model.load_state_dict(new_state_dict, strict=False)
+        model_obj = self.model.module if isinstance(
+            self.model, nn.DataParallel) else self.model
+        model_obj.load_state_dict(new_state, strict=False)
+        print("✅ Model weights loaded")
 
-        self.total_steps = state_dict.get('total_steps', 0)
+        # optimizer
+        if self.isTrain and (not getattr(self.opt, 'new_optim', False)) and state.get('optimizer_state') is not None:
+            try:
+                self.optimizer.load_state_dict(state['optimizer_state'])
+                # move optimizer tensors to correct device
+                for group in self.optimizer.state.values():
+                    for k, v in group.items():
+                        if torch.is_tensor(v):
+                            group[k] = v.to(self.device)
+                print("✅ Optimizer state loaded")
+            except Exception as e:
+                print(f"⚠️ Could not load optimizer state: {e}")
 
-        # Only load optimizer state if we are continuing training
-        if self.isTrain and not self.opt.new_optim and 'optimizer' in state_dict:
-            self.optimizer.load_state_dict(state_dict['optimizer'])
-            # Move optimizer state to correct device
-            for state in self.optimizer.state.values():
-                for k, v in state.items():
-                    if torch.is_tensor(v):
-                        state[k] = v.to(self.device)
-            # Update learning rate from options
-            for g in self.optimizer.param_groups:
-                g['lr'] = self.opt.lr
+        # scheduler
+        if self.isTrain and hasattr(self, 'scheduler') and state.get('scheduler_state') is not None:
+            try:
+                self.scheduler.load_state_dict(state['scheduler_state'])
+                print("✅ Scheduler state loaded")
+            except Exception as e:
+                print(f"⚠️ Could not load scheduler state: {e}")
 
-        # Load scheduler state if it exists
-        if self.isTrain and hasattr(self, 'scheduler') and 'scheduler' in state_dict:
-            self.scheduler.load_state_dict(state_dict['scheduler'])
+        self.total_steps = state.get('total_steps', self.total_steps)
 
     def eval(self):
         self.model.eval()
@@ -107,6 +120,9 @@ def init_weights(net, init_type='normal', gain=0.02):
             if hasattr(m, 'bias') and m.bias is not None:
                 init.constant_(m.bias.data, 0.0)
         elif classname.find('BatchNorm2d') != -1:
-            init.normal_(m.weight.data, 1.0, gain)
-            init.constant_(m.bias.data, 0.0)
+            try:
+                init.normal_(m.weight.data, 1.0, gain)
+                init.constant_(m.bias.data, 0.0)
+            except Exception:
+                pass
     net.apply(init_func)

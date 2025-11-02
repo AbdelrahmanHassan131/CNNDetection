@@ -3,115 +3,124 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet50
 from networks.base_model import BaseModel
-import pywt
-import cv2
-import numpy as np
-
-# =========================
-# Wavelet preprocessing (FIXED)
-# =========================
+import math
 
 
-def rgb_to_wavelet12(img):
+# -------------------------
+# Torch-based Haar single-level DWT (GPU friendly)
+# -------------------------
+def haar_dwt_2d_tensor(x):
     """
-    Convert RGB image (H,W,3) or (3,H,W) to 12-channel wavelet tensor (12,H,W)
-    🆕 FIXED: Added proper normalization
+    Input:
+        x: (B,3,H,W) float tensor
+    Output:
+        y: (B,12,H, W) -> we compute 12 subbands per sample (4 per channel),
+        but we produce them by doing conv stride=2 and then upsampling back to (H,W)
+        so the final tensor is same spatial size as input (matching behavior in your code).
+    Implementation details:
+        - Use grouped conv with predefined 2x2 Haar filters for each channel.
+        - conv with stride=2 downsamples to H/2,W/2 producing 12 channels (4 per input channel).
+        - then upsample back to original H,W using bilinear interpolation.
     """
-    if torch.is_tensor(img):
-        img = img.cpu().numpy()
+    assert x.ndim == 4 and x.size(1) == 3, "Expected (B,3,H,W)"
+    device = x.device
+    dtype = x.dtype
 
-    if img.shape[0] == 3:  # (3,H,W)
-        img = img.transpose(1, 2, 0)  # (H,W,3)
+    # Haar 2x2 filters: LL, LH, HL, HH
+    # Note: normalization factor 0.5 to preserve energy
+    LL = torch.tensor([[0.5, 0.5], [0.5, 0.5]], dtype=dtype, device=device)
+    LH = torch.tensor([[0.5, 0.5], [-0.5, -0.5]], dtype=dtype, device=device)
+    HL = torch.tensor([[0.5, -0.5], [0.5, -0.5]], dtype=dtype, device=device)
+    HH = torch.tensor([[0.5, -0.5], [-0.5, 0.5]], dtype=dtype, device=device)
 
-    wavelet_channels = []
-    for c in range(3):
-        coeffs2 = pywt.dwt2(img[:, :, c], 'haar')
-        LL, (LH, HL, HH) = coeffs2
-        wavelet_channels.extend([LL, LH, HL, HH])
+    # Build weight: out_channels = 12 (4 subbands * 3 channels), groups=3
+    # Weight shape for conv2d with groups=3: (out_channels, in_channels_per_group, kH, kW)
+    # in_channels_per_group = 1
+    filters = torch.stack([LL, LH, HL, HH], dim=0)  # (4,2,2)
+    # Repeat filters for each input channel
+    filters = filters.unsqueeze(1)  # (4,1,2,2)
+    filters = filters.repeat(3, 1, 1, 1)  # (12,1,2,2)
 
-    wavelet_channels = np.stack(wavelet_channels, axis=0)  # (12,H/2,W/2)
+    # conv2d grouped: in_channels=3, out_channels=12, groups=3
+    # Ensure dtype and device match
+    weight = filters.to(dtype=dtype, device=device)
 
-    # Upsample to original H,W
-    H, W = img.shape[:2]
-    wavelet_resized = []
-    for i in range(wavelet_channels.shape[0]):
-        ch = cv2.resize(wavelet_channels[i],
-                        (W, H), interpolation=cv2.INTER_LINEAR)
-        wavelet_resized.append(ch)
-    wavelet_resized = np.stack(wavelet_resized, axis=0)
+    # Perform grouped conv
+    # x: (B,3,H,W) -> out: (B,12,H/2,W/2)
+    out = F.conv2d(x, weight=weight, bias=None, stride=2, padding=0, groups=3)
 
-    # 🆕 CRITICAL FIX: Normalize wavelet coefficients
-    wavelet_mean = wavelet_resized.mean()
-    wavelet_std = wavelet_resized.std() + 1e-8
-    wavelet_resized = (wavelet_resized - wavelet_mean) / wavelet_std
+    # upsample back to original size (B,12,H,W)
+    H, W = x.shape[2], x.shape[3]
+    out_up = F.interpolate(out, size=(
+        H, W), mode='bilinear', align_corners=False)
 
-    return torch.tensor(wavelet_resized, dtype=torch.float32)
+    # normalize per-sample to reduce scale differences
+    # compute mean/std across channels & spatial dims per sample
+    B = out_up.shape[0]
+    out_flat = out_up.view(B, -1)
+    mean = out_flat.mean(dim=1).view(B, 1, 1, 1)
+    std = out_flat.std(dim=1).view(B, 1, 1, 1).clamp(min=1e-6)
+    out_norm = (out_up - mean) / std
+
+    return out_norm
 
 
-# =========================
-# Improved Wavelet Embedding CNN
-# =========================
-
+# -------------------------
+# Wavelet embedding CNN: 12 -> 3 (learnable)
+# -------------------------
 class WaveletEmbedCNN(nn.Module):
     def __init__(self, in_ch=12, out_ch=3):
         super(WaveletEmbedCNN, self).__init__()
-        # 🆕 IMPROVED: Deeper network
-        self.embed = nn.Sequential(
+        self.net = nn.Sequential(
             nn.Conv2d(in_ch, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, out_ch, kernel_size=3, padding=1),
+            nn.Conv2d(32, out_ch, kernel_size=1, padding=0),
+            nn.Tanh()  # keep outputs in reasonable range
         )
 
     def forward(self, x):
-        return self.embed(x)
+        return self.net(x)
 
 
-# =========================
-# Wavelet-ResNet50 Trainer (MULTI-GPU FIXED)
-# =========================
-
+# -------------------------
+# Full trainer (uses BaseModel)
+# -------------------------
 class Wavelet_ResNet_Trainer(BaseModel):
     def name(self):
         return "Wavelet_ResNet50_Trainer"
 
     def __init__(self, opt):
         super(Wavelet_ResNet_Trainer, self).__init__(opt)
-
-        # 🆕 CRITICAL FIX: Get device and ensure all components use it consistently
         device = self.device
         print(f"\n🔧 Building Wavelet-ResNet50 Model on {device}...")
 
-        # === Build all components WITHOUT moving to device yet ===
-        print("   📦 Creating wavelet embedding network...")
+        # components (do not move to device yet)
         self.wavelet_embed = WaveletEmbedCNN(in_ch=12, out_ch=3)
 
-        # 🆕 CRITICAL FIX: Use weights parameter instead of pretrained
-        print("   📦 Loading pretrained ResNet50 backbone...")
+        # load pretrained resnet50 backbone
         try:
             from torchvision.models import ResNet50_Weights
             self.backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
-        except:
-            # Fallback for older torchvision
+        except Exception:
             self.backbone = resnet50(pretrained=True)
+        # remove final fc
         self.backbone.fc = nn.Identity()
 
-        # === Determine feature dimension on CPU first ===
-        print("   🔍 Detecting feature dimensions...")
+        # determine output dimension (on CPU dummy)
         self.wavelet_embed.eval()
         self.backbone.eval()
         with torch.no_grad():
             dummy = torch.randn(1, 12, 224, 224)
             feat = self.backbone(self.wavelet_embed(dummy))
             feat_dim = feat.shape[1]
-            print(f"   ✓ Feature dimension: {feat_dim}")
+            print(f"   🔍 Detected feature dimension: {feat_dim}")
 
-        # === Create classification head ===
-        print("   📦 Creating classification head...")
-        self.new_head = nn.Sequential(
+        # classification head
+        self.fc_head = nn.Sequential(
             nn.Dropout(0.3),
             nn.Linear(feat_dim, 512),
             nn.ReLU(inplace=True),
@@ -119,173 +128,154 @@ class Wavelet_ResNet_Trainer(BaseModel):
             nn.Linear(512, 1)
         )
 
-        # 🆕 CRITICAL FIX: Assemble model THEN move everything to device at once
-        print("   🔗 Assembling full model...")
-        self.model = nn.Sequential(
-            self.wavelet_embed,
-            self.backbone,
-            nn.Flatten(),
-            self.new_head
-        )
+        # assemble model: wavelet_embed -> backbone -> flatten -> head
+        # make a single nn.Module for wrapping
+        class _Model(nn.Module):
+            def __init__(self, embed, backbone, head):
+                super().__init__()
+                self.embed = embed
+                self.backbone = backbone
+                self.head = head
 
-        # 🆕 CRITICAL FIX: Move entire model to device BEFORE DataParallel
-        print(f"   📍 Moving model to {device}...")
-        self.model = self.model.to(device)
+            def forward(self, x):
+                # x expected (B,3,H,W)
+                # compute dwt features
+                wav = haar_dwt_2d_tensor(x)   # (B,12,H,W) on same device
+                mapped = self.embed(wav)      # (B,3,H,W)
+                feats = self.backbone(mapped)  # (B, feat_dim)
+                out = self.head(feats)
+                return out
 
-        # 🆕 CRITICAL FIX: Now setup multi-GPU with properly placed model
-        print("   🎮 Setting up GPU configuration...")
-        if len(opt.gpu_ids) > 1 and torch.cuda.device_count() > 1:
-            print(f"      🚀 Enabling DataParallel on GPUs: {opt.gpu_ids}")
-            # 🆕 FIX: Convert BatchNorm to SyncBatchNorm for multi-GPU
-            print(f"      🔄 Converting BatchNorm to SyncBatchNorm for multi-GPU...")
-            self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
+        self.model = _Model(self.wavelet_embed, self.backbone, self.fc_head)
+
+        # move model to device before DataParallel
+        print(f"   📍 Moving model to {device} ...")
+        self.model.to(device)
+
+        # DataParallel if requested
+        if getattr(opt, 'gpu_ids', None) and len(opt.gpu_ids) > 1 and torch.cuda.device_count() > 1:
+            print(f"   🎮 Enabling DataParallel on GPUs: {opt.gpu_ids}")
             self.model = nn.DataParallel(self.model, device_ids=opt.gpu_ids)
-            print(
-                f"      ✓ Model will be replicated across {len(opt.gpu_ids)} GPUs")
+            print("   ✓ Model replicated across GPUs")
         else:
-            print(f"      ℹ️ Single GPU mode")
+            print("   ℹ️ Single GPU / CPU mode")
 
-        # 🆕 BETTER INITIALIZATION
+        # Training components
         if self.isTrain:
             print("\n⚙️ Initializing training components...")
+            # initialize head weights
 
-            # Initialize new layers with Xavier
-            if isinstance(self.model, nn.DataParallel):
-                # Access the actual model inside DataParallel
-                # The new_head is 4th component
-                new_head = self.model.module[3]
-            else:
-                new_head = self.model[3]
+            def _init_head(m):
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_normal_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+            self.fc_head.apply(_init_head)
 
-            nn.init.xavier_normal_(new_head[1].weight)
-            nn.init.zeros_(new_head[1].bias)
-            nn.init.xavier_normal_(new_head[4].weight)
-            nn.init.zeros_(new_head[4].bias)
-
-            # Loss function with class balancing support
+            # loss: BCEWithLogits (we will set pos_weight later if balancing)
             self.loss_fn = nn.BCEWithLogitsLoss()
-            self.use_weighted_loss = opt.class_bal if hasattr(
-                opt, 'class_bal') else False
-            self.pos_weight_computed = False
 
-            # 🆕 IMPROVED: Optimizer with weight decay
-            print(f"   📊 Learning rate: {opt.lr:.2e}")
-            print(f"   📊 Weight decay: 1e-4")
-            self.optimizer = torch.optim.Adam(
-                self.model.parameters(),
-                lr=opt.lr,
-                betas=(opt.beta1, 0.999),
-                weight_decay=1e-4
-            )
+            # optimizer: discriminative LR - smaller for backbone
+            backbone_params = list(self.backbone.parameters())
+            head_params = list(self.wavelet_embed.parameters()
+                               ) + list(self.fc_head.parameters())
+            self.optimizer = torch.optim.AdamW([
+                {'params': backbone_params, 'lr': opt.lr * 0.1},
+                {'params': head_params, 'lr': opt.lr}
+            ], betas=(opt.beta1, 0.999), weight_decay=1e-4)
 
-            # Learning rate scheduler
-            print(f"   📊 Scheduler: ReduceLROnPlateau (patience=2)")
+            # scheduler (monitor AP/acc externally)
             self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer,
-                mode='max',
-                factor=0.5,
-                patience=2,
-                verbose=True,
-                min_lr=1e-7
+                self.optimizer, mode='max', factor=0.5, patience=2, verbose=True, min_lr=1e-7
             )
 
-        # Load checkpoint if continuing training
-        if opt.continue_train:
+            # bookkeeping for class balancing
+            self.use_weighted_loss = getattr(opt, 'class_bal', False)
+            self.pos_weight_computed = False
+            self._label_counter = {'0': 0, '1': 0}
+
+        # load checkpoint if required
+        if getattr(opt, 'continue_train', False):
             try:
-                print(
-                    f"\n🔄 Continuing training — loading checkpoint from epoch {opt.epoch}...")
                 self.load_networks(opt.epoch)
-                print(
-                    f"✅ Loaded checkpoint successfully (steps: {self.total_steps})")
             except Exception as e:
                 print(f"⚠️ Failed to load checkpoint: {e}")
 
-        self.device = device
-        self.model_names = ['model']
         print("✅ Model setup complete!\n")
 
-    # =========================
-    # Input preparation (IMPROVED)
-    # =========================
+    # set_input: accept torch tensor (B,C,H,W) or numpy/PIL per-sample
     def set_input(self, input_data):
+        # flexible input formats
         if isinstance(input_data, (list, tuple)):
             image, label = input_data
+        elif isinstance(input_data, dict):
+            image = input_data.get('image')
+            label = input_data.get('label')
         else:
-            image = input_data['image']
-            label = input_data['label']
+            raise ValueError("Unsupported input data type")
 
-        # Convert to 12-channel wavelets
-        wavelet_imgs = []
-        for img in image:
-            wavelet_imgs.append(rgb_to_wavelet12(img))
-        self.input = torch.stack(wavelet_imgs).to(self.device)
-        self.label = label.float().to(self.device)
+        # if image is numpy array per-sample, convert; if torch tensor, keep
+        # Expect image to be torch.Tensor shaped (B,3,H,W) or list of tensors
+        if isinstance(image, torch.Tensor):
+            imgs = image
+        else:
+            # image could be list/ndarray - convert to tensor
+            imgs = torch.stack([torch.tensor(img).permute(2, 0, 1).float() if (isinstance(img, (list, tuple)) or (
+                hasattr(img, 'ndim') and img.ndim == 3)) else torch.tensor(img).float() for img in image])
 
-        # Track label distribution for debugging
-        if not hasattr(self, '_label_counter'):
-            self._label_counter = {'0': 0, '1': 0}
-        self._label_counter['0'] += (self.label == 0).sum().item()
-        self._label_counter['1'] += (self.label == 1).sum().item()
+        # Move to device, ensure contiguous & normalized by user pipeline
+        imgs = imgs.to(self.device, non_blocking=True).contiguous()
+        self.input = imgs
+        self.label = torch.tensor(
+            label, dtype=torch.float32, device=self.device).contiguous()
 
-    # =========================
-    # Forward pass
-    # =========================
+        # update counters
+        self._label_counter['0'] += int((self.label == 0).sum().item())
+        self._label_counter['1'] += int((self.label == 1).sum().item())
+
     def forward(self, x):
+        # ensure contiguous and on correct device
+        x = x.to(self.device, non_blocking=True).contiguous()
         return self.model(x)
 
-    # =========================
-    # Training step (IMPROVED + WEIGHTED LOSS)
-    # =========================
     def optimize_parameters(self):
         self.model.train()
 
-        # Compute pos_weight after first few batches for class balancing
-        if self.use_weighted_loss and not self.pos_weight_computed and hasattr(self, '_label_counter'):
+        # compute pos_weight when we have enough samples
+        if self.use_weighted_loss and (not self.pos_weight_computed):
             total = self._label_counter['0'] + self._label_counter['1']
-            if total > 1000:  # Wait for 1000 samples
-                n_neg = self._label_counter['0']
-                n_pos = self._label_counter['1']
-                if n_pos > 0 and n_neg > 0:
-                    pos_weight = torch.tensor([n_neg / n_pos]).to(self.device)
-                    self.loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-                    print(f"\n🎯 Class balancing enabled!")
-                    print(f"   Fake (0): {n_neg} samples")
-                    print(f"   Real (1): {n_pos} samples")
-                    print(f"   Pos weight: {pos_weight.item():.4f}\n")
-                    self.pos_weight_computed = True
+            if total >= 1000 and self._label_counter['1'] > 0:
+                pos_weight = torch.tensor(
+                    [self._label_counter['0'] / float(max(1, self._label_counter['1']))], device=self.device)
+                self.loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+                print(
+                    f"\n🎯 Class balancing enabled! Fake={self._label_counter['0']}, Real={self._label_counter['1']}, pos_weight={pos_weight.item():.4f}\n")
+                self.pos_weight_computed = True
 
-        logits = self.forward(self.input)
-        loss = self.loss_fn(logits.squeeze(1), self.label)
+        logits = self.forward(self.input)  # (B,1)
+        loss = self.loss_fn(logits.view(-1), self.label.view(-1))
 
         self.optimizer.zero_grad()
         loss.backward()
-
-        # Gradient clipping to prevent exploding gradients
+        # gradient clipping
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
         self.optimizer.step()
-        self.loss = loss
 
-        # Track predictions for debugging
+        self.loss = loss.detach().cpu().item()
+
+        # compute batch acc
         with torch.no_grad():
-            preds = (torch.sigmoid(logits.squeeze(1)) > 0.5).float()
-            self.batch_acc = (preds == self.label).float().mean()
+            probs = torch.sigmoid(logits.view(-1))
+            preds = (probs > 0.5).float()
+            self.batch_acc = ((preds == self.label.view(-1)
+                               ).float().mean()).cpu().item()
 
-    # Method to update scheduler
-    def update_learning_rate(self, val_acc):
-        """Call this after validation to adjust learning rate"""
-        if hasattr(self, 'scheduler'):
-            old_lr = self.optimizer.param_groups[0]['lr']
-            self.scheduler.step(val_acc)
-            new_lr = self.optimizer.param_groups[0]['lr']
-            if old_lr != new_lr:
-                print(f"📉 Learning rate updated: {old_lr:.2e} → {new_lr:.2e}")
+    def update_learning_rate(self, val_metric):
+        if hasattr(self, 'scheduler') and self.scheduler is not None:
+            self.scheduler.step(val_metric)
 
-    # Method to print label distribution
     def print_label_stats(self):
-        if hasattr(self, '_label_counter'):
-            total = self._label_counter['0'] + self._label_counter['1']
-            if total > 0:
-                print(f"📊 Label distribution so far: "
-                      f"Real={self._label_counter['1']} ({100*self._label_counter['1']/total:.1f}%), "
-                      f"Fake={self._label_counter['0']} ({100*self._label_counter['0']/total:.1f}%)")
+        total = self._label_counter['0'] + self._label_counter['1']
+        if total > 0:
+            print(
+                f"📊 Label distribution so far: Real={self._label_counter['1']} ({100*self._label_counter['1']/total:.1f}%), Fake={self._label_counter['0']} ({100*self._label_counter['0']/total:.1f}%)")
