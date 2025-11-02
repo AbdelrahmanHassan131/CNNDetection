@@ -136,6 +136,9 @@ class Wavelet_ResNet_Trainer(BaseModel):
         print("   🎮 Setting up GPU configuration...")
         if len(opt.gpu_ids) > 1 and torch.cuda.device_count() > 1:
             print(f"      🚀 Enabling DataParallel on GPUs: {opt.gpu_ids}")
+            # 🆕 FIX: Convert BatchNorm to SyncBatchNorm for multi-GPU
+            print(f"      🔄 Converting BatchNorm to SyncBatchNorm for multi-GPU...")
+            self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
             self.model = nn.DataParallel(self.model, device_ids=opt.gpu_ids)
             print(
                 f"      ✓ Model will be replicated across {len(opt.gpu_ids)} GPUs")
