@@ -71,7 +71,7 @@ class WaveletEmbedCNN(nn.Module):
 
 
 # =========================
-# Wavelet-ResNet50 Trainer (MULTI-GPU OPTIMIZED)
+# Wavelet-ResNet50 Trainer (MULTI-GPU FIXED)
 # =========================
 
 class Wavelet_ResNet_Trainer(BaseModel):
@@ -81,31 +81,35 @@ class Wavelet_ResNet_Trainer(BaseModel):
     def __init__(self, opt):
         super(Wavelet_ResNet_Trainer, self).__init__(opt)
 
-        # 🆕 IMPROVED: Set device first
+        # 🆕 CRITICAL FIX: Get device and ensure all components use it consistently
         device = self.device
-        print(f"\n🔧 Building Wavelet-ResNet50 Model...")
+        print(f"\n🔧 Building Wavelet-ResNet50 Model on {device}...")
 
-        # === Wavelet embedder 12->3 channels ===
+        # === Build all components WITHOUT moving to device yet ===
         print("   📦 Creating wavelet embedding network...")
         self.wavelet_embed = WaveletEmbedCNN(in_ch=12, out_ch=3)
 
-        # 🆕 CRITICAL FIX: Use pretrained=True for better initialization
+        # 🆕 CRITICAL FIX: Use weights parameter instead of pretrained
         print("   📦 Loading pretrained ResNet50 backbone...")
-        self.backbone = resnet50(pretrained=True)
+        try:
+            from torchvision.models import ResNet50_Weights
+            self.backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+        except:
+            # Fallback for older torchvision
+            self.backbone = resnet50(pretrained=True)
         self.backbone.fc = nn.Identity()
 
-        # === Determine feature dimension dynamically ===
+        # === Determine feature dimension on CPU first ===
         print("   🔍 Detecting feature dimensions...")
+        self.wavelet_embed.eval()
+        self.backbone.eval()
         with torch.no_grad():
-            # Move to device for feature detection
-            temp_embed = self.wavelet_embed.to(device)
-            temp_backbone = self.backbone.to(device)
-            dummy = torch.randn(1, 12, 224, 224).to(device)
-            feat = temp_backbone(temp_embed(dummy))
+            dummy = torch.randn(1, 12, 224, 224)
+            feat = self.backbone(self.wavelet_embed(dummy))
             feat_dim = feat.shape[1]
             print(f"   ✓ Feature dimension: {feat_dim}")
 
-        # 🆕 IMPROVED: Better classifier with dropout for regularization
+        # === Create classification head ===
         print("   📦 Creating classification head...")
         self.new_head = nn.Sequential(
             nn.Dropout(0.3),
@@ -115,7 +119,7 @@ class Wavelet_ResNet_Trainer(BaseModel):
             nn.Linear(512, 1)
         )
 
-        # === Combine model for saving/loading ===
+        # 🆕 CRITICAL FIX: Assemble model THEN move everything to device at once
         print("   🔗 Assembling full model...")
         self.model = nn.Sequential(
             self.wavelet_embed,
@@ -124,19 +128,36 @@ class Wavelet_ResNet_Trainer(BaseModel):
             self.new_head
         )
 
-        # 🆕 CRITICAL: Setup multi-GPU AFTER model is defined
+        # 🆕 CRITICAL FIX: Move entire model to device BEFORE DataParallel
+        print(f"   📍 Moving model to {device}...")
+        self.model = self.model.to(device)
+
+        # 🆕 CRITICAL FIX: Now setup multi-GPU with properly placed model
         print("   🎮 Setting up GPU configuration...")
-        self.setup_multi_gpu()
+        if len(opt.gpu_ids) > 1 and torch.cuda.device_count() > 1:
+            print(f"      🚀 Enabling DataParallel on GPUs: {opt.gpu_ids}")
+            self.model = nn.DataParallel(self.model, device_ids=opt.gpu_ids)
+            print(
+                f"      ✓ Model will be replicated across {len(opt.gpu_ids)} GPUs")
+        else:
+            print(f"      ℹ️ Single GPU mode")
 
         # 🆕 BETTER INITIALIZATION
         if self.isTrain:
             print("\n⚙️ Initializing training components...")
 
             # Initialize new layers with Xavier
-            nn.init.xavier_normal_(self.new_head[1].weight)
-            nn.init.zeros_(self.new_head[1].bias)
-            nn.init.xavier_normal_(self.new_head[4].weight)
-            nn.init.zeros_(self.new_head[4].bias)
+            if isinstance(self.model, nn.DataParallel):
+                # Access the actual model inside DataParallel
+                # The new_head is 4th component
+                new_head = self.model.module[3]
+            else:
+                new_head = self.model[3]
+
+            nn.init.xavier_normal_(new_head[1].weight)
+            nn.init.zeros_(new_head[1].bias)
+            nn.init.xavier_normal_(new_head[4].weight)
+            nn.init.zeros_(new_head[4].bias)
 
             # Loss function with class balancing support
             self.loss_fn = nn.BCEWithLogitsLoss()
