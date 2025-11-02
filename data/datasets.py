@@ -3,9 +3,9 @@ import numpy as np
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
-from random import random, choice
+from random import random, choice, uniform
 from io import BytesIO
-from PIL import Image, ImageFile
+from PIL import Image, ImageFile, ImageEnhance
 from scipy.ndimage.filters import gaussian_filter
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -61,7 +61,6 @@ def binary_dataset(opt, root):
     if not opt.isTrain and opt.no_resize:
         rz_func = transforms.Lambda(identity_transform)
     else:
-        # ✅ now passing partial function that captures opt safely
         from functools import partial
         rz_func = transforms.Lambda(partial(resize_with_opt, opt=opt))
 
@@ -94,16 +93,52 @@ class FileNameDataset(datasets.ImageFolder):
 
 
 # ----------------------------
-# Data augmentation utilities
+# 🆕 ENHANCED Data augmentation
 # ----------------------------
 
 def data_augment(img, opt):
+    """
+    Enhanced augmentation to prevent overfitting
+    """
     img = np.array(img)
 
+    # 🆕 ALWAYS apply if data_aug is enabled (not probabilistic)
+    if opt.data_aug:
+        # Convert to PIL for easier manipulation
+        img_pil = Image.fromarray(img)
+
+        # 🆕 1. Color Jittering (50% chance)
+        if random() < 0.5:
+            # Brightness
+            brightness_factor = uniform(0.8, 1.2)
+            enhancer = ImageEnhance.Brightness(img_pil)
+            img_pil = enhancer.enhance(brightness_factor)
+
+            # Contrast
+            contrast_factor = uniform(0.8, 1.2)
+            enhancer = ImageEnhance.Contrast(img_pil)
+            img_pil = enhancer.enhance(contrast_factor)
+
+            # Saturation
+            saturation_factor = uniform(0.8, 1.2)
+            enhancer = ImageEnhance.Color(img_pil)
+            img_pil = enhancer.enhance(saturation_factor)
+
+        # Convert back to numpy
+        img = np.array(img_pil)
+
+        # 🆕 2. Gaussian Noise (30% chance)
+        if random() < 0.3:
+            noise = np.random.normal(0, 5, img.shape).astype(np.uint8)
+            img = np.clip(img.astype(np.int16) + noise,
+                          0, 255).astype(np.uint8)
+
+    # 🆕 3. Blur (increased probability)
     if random() < opt.blur_prob:
         sig = sample_continuous(opt.blur_sig)
         gaussian_blur(img, sig)
 
+    # 🆕 4. JPEG compression (increased probability)
     if random() < opt.jpg_prob:
         method = sample_discrete(opt.jpg_method)
         qual = sample_discrete(opt.jpg_qual)
