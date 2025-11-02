@@ -30,14 +30,41 @@ def get_val_opt():
 
 
 if __name__ == '__main__':
+    # 🆕 IMPROVED: Enable cuDNN benchmarking for faster training
     torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.enabled = True
+
+    # 🆕 ADDED: Print GPU information
+    print("="*60)
+    print("🎮 GPU INFORMATION")
+    print("="*60)
+    if torch.cuda.is_available():
+        print(f"Available GPUs: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+            print(
+                f"    Memory: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f} GB")
+    else:
+        print("⚠️ No CUDA GPUs available!")
+    print("="*60)
+    print()
+
     opt = TrainOptions().parse()
     opt.dataroot = f"{opt.dataroot}/{opt.train_split}/"
     val_opt = get_val_opt()
 
     # === Data loader ===
+    print("📦 Creating data loader...")
     data_loader = create_dataloader(opt)
-    print(f"# Training images = {len(data_loader)}")
+    print(f"✓ Training batches per epoch: {len(data_loader)}")
+    print(f"✓ Total images per epoch: {len(data_loader) * opt.batch_size}")
+
+    # 🆕 IMPROVED: Calculate effective batch size with multi-GPU
+    if len(opt.gpu_ids) > 1:
+        effective_batch = opt.batch_size * len(opt.gpu_ids)
+        print(f"✓ Effective batch size (multi-GPU): {effective_batch}")
+        print(f"  ({opt.batch_size} per GPU × {len(opt.gpu_ids)} GPUs)")
+    print()
 
     # === Logging ===
     train_writer = SummaryWriter(os.path.join(
@@ -48,25 +75,31 @@ if __name__ == '__main__':
     # === Model ===
     model = Wavelet_ResNet_Trainer(opt)
 
-    # 🆕 IMPROVED: Better early stopping configuration
+    # Early stopping configuration
     early_stopping = EarlyStopping(
         patience=opt.earlystop_epoch,
-        delta=0.001,  # Changed from -0.001 (should be positive)
+        delta=0.001,
         verbose=True
     )
 
     print(f"🚀 Starting Wavelet-ResNet50 training for {opt.niter} epochs...")
     print(f"📋 Initial LR: {opt.lr:.2e}")
-    print(f"📋 Batch size: {opt.batch_size}")
-    print(f"📋 Device: {model.device}\n")
+    print(f"📋 Batch size per GPU: {opt.batch_size}")
+    if len(opt.gpu_ids) > 1:
+        print(
+            f"📋 Total effective batch size: {opt.batch_size * len(opt.gpu_ids)}")
+    print(f"📋 Device: {model.device}")
+    print(f"📋 Data augmentation: {'Enabled' if opt.data_aug else 'Disabled'}")
+    print(f"📋 Class balancing: {'Enabled' if opt.class_bal else 'Disabled'}")
+    print()
 
-    # 🆕 FIX: Define these at module level, not inside function
+    # Track best metrics
     best_acc = 0.0
     best_ap = 0.0
 
     # === Enhanced validation function ===
     def evaluate_model(epoch):
-        global best_acc, best_ap  # FIX: Use global instead of nonlocal
+        global best_acc, best_ap
 
         model.eval()
         try:
@@ -85,11 +118,11 @@ if __name__ == '__main__':
             model.train()
             return None
 
-        # 🆕 ADDED: Log to tensorboard
+        # Log to tensorboard
         val_writer.add_scalar('accuracy', acc, model.total_steps)
         val_writer.add_scalar('ap', ap, model.total_steps)
 
-        # 🆕 ADDED: Track improvements
+        # Track improvements
         improved = ""
         if acc > best_acc:
             best_acc = acc
@@ -106,7 +139,6 @@ if __name__ == '__main__':
         return acc
 
     # === Training loop ===
-    # 🆕 ADDED: Track training metrics
     epoch_losses = []
     epoch_accs = []
 
@@ -134,12 +166,12 @@ if __name__ == '__main__':
             # === Train Step ===
             model.optimize_parameters()
 
-            # 🆕 ADDED: Accumulate metrics
+            # Accumulate metrics
             epoch_loss_sum += float(model.loss)
             epoch_acc_sum += float(model.batch_acc)
             num_batches += 1
 
-            # 🆕 IMPROVED: More informative logging
+            # Logging
             if model.total_steps % opt.loss_freq == 0:
                 try:
                     loss_val = float(model.loss)
@@ -160,16 +192,16 @@ if __name__ == '__main__':
                                         model.optimizer.param_groups[0]['lr'],
                                         model.total_steps)
 
-            # 🆕 ADDED: Periodic validation during epoch
+            # Periodic validation during epoch
             if model.total_steps % opt.save_latest_freq == 0:
                 print(f"\n💾 Saving latest model (step {model.total_steps})")
                 model.save_networks('latest')
                 val_acc = evaluate_model(epoch)
 
-                # 🆕 ADDED: Update learning rate based on validation
+                # Update learning rate based on validation
                 if val_acc is not None:
                     model.update_learning_rate(val_acc)
-                print()  # Empty line for readability
+                print()
 
         # === End of epoch summary ===
         avg_epoch_loss = epoch_loss_sum / num_batches
@@ -183,7 +215,7 @@ if __name__ == '__main__':
         print(f"   Avg Train Batch Acc: {avg_epoch_acc:.4f}")
         print(f"{'─'*60}\n")
 
-        # 🆕 ADDED: Print label distribution
+        # Print label distribution
         model.print_label_stats()
 
         # === Save epoch checkpoint & validation ===
@@ -194,7 +226,7 @@ if __name__ == '__main__':
         # Final validation for the epoch
         acc = evaluate_model(epoch)
 
-        # 🆕 ADDED: Update learning rate
+        # Update learning rate
         if acc is not None:
             model.update_learning_rate(acc)
 
