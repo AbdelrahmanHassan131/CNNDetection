@@ -73,7 +73,12 @@ if __name__ == '__main__':
                 print('saving the latest model %s (epoch %d, model.total_steps %d)' %
                       (opt.name, epoch, model.total_steps))
                 model.save_networks('latest')
-
+                # Validation
+                model.eval()
+                acc, ap = validate(model.model, val_opt)[:2]
+                val_writer.add_scalar('accuracy', acc, model.total_steps)
+                val_writer.add_scalar('ap', ap, model.total_steps)
+                print("(Val @ epoch {}) acc: {}; ap: {}".format(epoch, acc, ap))
             # print("Iter time: %d sec" % (time.time()-iter_data_time))
             # iter_data_time = time.time()
 
