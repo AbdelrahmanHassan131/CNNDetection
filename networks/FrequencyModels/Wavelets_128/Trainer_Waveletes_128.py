@@ -166,3 +166,22 @@ class Wavelet_ResNet_Trainer(BaseModel):
         loss.backward()
         self.optimizer.step()
         self.loss = loss
+
+        # 🆕 ADDED: Method to update scheduler
+    def update_learning_rate(self, val_acc):
+        """Call this after validation to adjust learning rate"""
+        if hasattr(self, 'scheduler'):
+            old_lr = self.optimizer.param_groups[0]['lr']
+            self.scheduler.step(val_acc)
+            new_lr = self.optimizer.param_groups[0]['lr']
+            if old_lr != new_lr:
+                print(f"📉 Learning rate updated: {old_lr:.2e} → {new_lr:.2e}")
+
+    # 🆕 ADDED: Method to print label distribution
+    def print_label_stats(self):
+        if hasattr(self, '_label_counter'):
+            total = self._label_counter['0'] + self._label_counter['1']
+            if total > 0:
+                print(f"📊 Label distribution so far: "
+                      f"Real={self._label_counter['1']} ({100*self._label_counter['1']/total:.1f}%), "
+                      f"Fake={self._label_counter['0']} ({100*self._label_counter['0']/total:.1f}%)")
