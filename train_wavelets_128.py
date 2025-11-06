@@ -152,6 +152,7 @@ if __name__ == '__main__':
                       f"Loss: {loss_val:.6f} | "
                       # f"Batch Acc: {batch_acc:.4f} | "
                       f"LR: {model.optimizer.param_groups[0]['lr']:.2e}")
+                acc = evaluate_model(epoch)
 
                 train_writer.add_scalar('loss', model.loss, model.total_steps)
                 # train_writer.add_scalar(
