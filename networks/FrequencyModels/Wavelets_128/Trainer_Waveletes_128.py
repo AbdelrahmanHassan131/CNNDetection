@@ -75,10 +75,13 @@ class Wavelet_ResNet_Trainer(BaseModel):
         pretrained_flag = self.isTrain and not opt.continue_train
 
         # === Wavelet embedder 12->3 channels ===
-        self.wavelet_embed = WaveletEmbedCNN(in_ch=12, out_ch=3).to(device)
+        # self.wavelet_embed = WaveletEmbedCNN(in_ch=12, out_ch=3).to(device)
 
         # === ResNet50 backbone (USE PRETRAINED!) ===
         self.backbone = resnet50(pretrained=pretrained_flag)
+        self.backbone.conv1 = nn.Conv2d(
+            12, 64, kernel_size=7, stride=2, padding=3, bias=False
+        )
         # Remove the final fully connected layer
         self.backbone.fc = nn.Identity()
         self.backbone = self.backbone.to(device)
