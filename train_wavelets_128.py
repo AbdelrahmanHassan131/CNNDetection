@@ -136,26 +136,26 @@ if __name__ == '__main__':
 
             # 🆕 ADDED: Accumulate metrics
             epoch_loss_sum += float(model.loss)
-            epoch_acc_sum += float(model.batch_acc)
+            # epoch_acc_sum += float(model.batch_acc)
             num_batches += 1
 
             # 🆕 IMPROVED: More informative logging
             if model.total_steps % opt.loss_freq == 0:
                 try:
                     loss_val = float(model.loss)
-                    batch_acc = float(model.batch_acc)
+                    # batch_acc = float(model.batch_acc)
                 except Exception:
                     loss_val = model.loss
-                    batch_acc = 0.0
+                    # batch_acc = 0.0
 
                 print(f"[Step {model.total_steps:6d}] "
                       f"Loss: {loss_val:.6f} | "
-                      f"Batch Acc: {batch_acc:.4f} | "
+                      # f"Batch Acc: {batch_acc:.4f} | "
                       f"LR: {model.optimizer.param_groups[0]['lr']:.2e}")
 
                 train_writer.add_scalar('loss', model.loss, model.total_steps)
-                train_writer.add_scalar(
-                    'batch_acc', model.batch_acc, model.total_steps)
+                # train_writer.add_scalar(
+                #     'batch_acc', model.batch_acc, model.total_steps)
                 train_writer.add_scalar('learning_rate',
                                         model.optimizer.param_groups[0]['lr'],
                                         model.total_steps)
