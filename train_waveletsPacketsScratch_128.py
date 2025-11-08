@@ -55,6 +55,13 @@ if __name__ == "__main__":
     print(f"💾 Log scaling: {getattr(opt, 'use_log_packets', True)}")
     print(
         f"👷 DataLoader workers: {opt.num_threads} (parallel wavelet computation)")
+
+    # ⚠️ Warning if no workers (will be very slow!)
+    if opt.num_threads == 0:
+        print("⚠️  WARNING: num_threads=0 means NO parallel processing!")
+        print("⚠️  Wavelet computation will be VERY SLOW (serial)")
+        print("⚠️  Recommendation: Set --num_threads 4 or higher")
+
     print(f"🎯 Batch size: {opt.batch_size}")
     print("=" * 80)
 

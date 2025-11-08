@@ -238,15 +238,15 @@ class WaveletBinaryDataset(datasets.ImageFolder):
         else:
             rz_func = transforms.Lambda(lambda img: custom_resize(img, opt))
 
-        # Standard image transforms
-        self.transform = transforms.Compose([
+        # Standard image transforms (don't include ToTensor yet)
+        self.image_transform = transforms.Compose([
             rz_func,
             transforms.Lambda(lambda img: data_augment(img, opt)),
             crop_func,
             flip_func,
         ])
 
-        # Initialize ImageFolder
+        # Initialize ImageFolder with no transform (we'll apply it in __getitem__)
         super().__init__(root, transform=None)
 
     def __getitem__(self, index):
