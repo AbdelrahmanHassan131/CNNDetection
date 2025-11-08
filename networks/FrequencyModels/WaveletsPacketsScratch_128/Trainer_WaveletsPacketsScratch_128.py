@@ -9,6 +9,8 @@ from networks.base_model import BaseModel, init_weights
 def compute_wavelet_packet_coeffs(img, wavelet='haar', level=3, mode='reflect'):
     """
     Compute wavelet packet coefficients for an RGB image.
+    NOTE: This function is now primarily used in validation/inference.
+    During training, wavelets are computed in the DataLoader.
 
     Args:
         img: torch tensor of shape (3, H, W) or numpy array (H, W, 3)
@@ -17,7 +19,7 @@ def compute_wavelet_packet_coeffs(img, wavelet='haar', level=3, mode='reflect'):
         mode: signal extension mode (default: 'reflect')
 
     Returns:
-        torch tensor of shape (C, H, W) where C = 3 * 4^level
+        torch tensor of shape (C, H', W') where C = 3 * 4^level
     """
     if torch.is_tensor(img):
         img = img.cpu().numpy()
@@ -29,6 +31,20 @@ def compute_wavelet_packet_coeffs(img, wavelet='haar', level=3, mode='reflect'):
     H, W, _ = img.shape
     all_packets = []
 
+    # Generate all wavelet packet paths at the given level
+    def get_paths(level):
+        """Generate all wavelet packet paths at a given level"""
+        if level == 0:
+            return ['']
+        paths = []
+        prev_paths = get_paths(level - 1)
+        for path in prev_paths:
+            for letter in ['a', 'h', 'v', 'd']:
+                paths.append(path + letter)
+        return paths
+
+    packet_paths = get_paths(level)
+
     # Process each color channel
     for c in range(3):
         channel = img[:, :, c]
@@ -36,22 +52,6 @@ def compute_wavelet_packet_coeffs(img, wavelet='haar', level=3, mode='reflect'):
         # Create wavelet packet decomposition
         wp = pywt.WaveletPacket2D(
             data=channel, wavelet=wavelet, mode=mode, maxlevel=level)
-
-        # Get all nodes at the specified level
-        # At level n, there are 4^n subbands
-        # Generate all possible paths at the given level
-        def get_paths(level):
-            """Generate all wavelet packet paths at a given level"""
-            if level == 0:
-                return ['']
-            paths = []
-            prev_paths = get_paths(level - 1)
-            for path in prev_paths:
-                for letter in ['a', 'h', 'v', 'd']:
-                    paths.append(path + letter)
-            return paths
-
-        packet_paths = get_paths(level)
 
         for path in packet_paths:
             coeff = wp[path].data
@@ -154,6 +154,8 @@ class WolterWaveletPacketTrainer(BaseModel):
     Wavelet-Packet DeepFake Detection Trainer
     Based on: Wolter et al. "Wavelet-Packets for Deepfake Image Analysis and Detection"
     Machine Learning, ECML PKDD 2022 Journal Track
+
+    OPTIMIZED VERSION: Wavelets are computed in DataLoader workers (parallel CPU processing)
     """
 
     def name(self):
@@ -162,7 +164,7 @@ class WolterWaveletPacketTrainer(BaseModel):
     def __init__(self, opt):
         super(WolterWaveletPacketTrainer, self).__init__(opt)
 
-        # Wavelet packet parameters
+        # Wavelet packet parameters (for validation/inference only)
         self.wavelet_type = getattr(opt, 'wavelet_type', 'haar')
         self.wavelet_level = getattr(opt, 'wavelet_level', 3)
         self.wavelet_mode = getattr(opt, 'wavelet_mode', 'reflect')
@@ -229,14 +231,21 @@ class WolterWaveletPacketTrainer(BaseModel):
     def __call__(self, input_tensor):
         """
         Make trainer callable for validation.
-        Handles wavelet packet conversion internally.
 
         Args:
-            input_tensor: RGB images (B, 3, H, W)
+            input_tensor: 
+                - If from dataloader with compute_wavelets=True: wavelet packets (B, 192, H, W)
+                - If RGB images: (B, 3, H, W) - will compute wavelets
         Returns:
             output logits (B, 1)
         """
-        # Convert each image to wavelet packets
+        # Check if input is already wavelet packets (192 channels) or RGB (3 channels)
+        if input_tensor.shape[1] == 192:  # Already wavelet packets from dataloader
+            # ✅ OPTIMIZED PATH: Direct forward pass, no preprocessing needed!
+            output = self.model(input_tensor.to(self.device))
+            return output
+
+        # Fallback: Input is RGB, compute wavelets (for backward compatibility)
         batch_packets = []
         for img in input_tensor:
             # Compute wavelet packet coefficients
@@ -269,34 +278,20 @@ class WolterWaveletPacketTrainer(BaseModel):
 
     def set_input(self, input):
         """
-        Process input images and convert to wavelet packet representation.
+        Process input from dataloader.
+
+        OPTIMIZED: Input is already wavelet packets from dataloader!
+        No wavelet computation needed here - just transfer to GPU.
 
         Args:
-            input: tuple of (images, labels)
-                images: torch tensor (B, 3, H, W)
+            input: tuple of (wavelet_packets, labels)
+                wavelet_packets: torch tensor (B, 192, H, W) - already computed in dataloader
                 labels: torch tensor (B,)
         """
-        images, labels = input[0], input[1]
+        wavelet_packets, labels = input[0], input[1]
 
-        # Convert each image to wavelet packets
-        batch_packets = []
-        for img in images:
-            # Compute wavelet packet coefficients
-            packets = compute_wavelet_packet_coeffs(
-                img,
-                wavelet=self.wavelet_type,
-                level=self.wavelet_level,
-                mode=self.wavelet_mode
-            )
-
-            # Apply log-scaling if specified
-            if self.use_log_packets:
-                packets = log_scale_packets(packets)
-
-            batch_packets.append(packets)
-
-        # Stack into batch
-        self.input = torch.stack(batch_packets).to(self.device)
+        # ✅ OPTIMIZED: Just transfer to GPU - wavelets already computed!
+        self.input = wavelet_packets.to(self.device)
         self.label = labels.to(self.device).float()
 
     def forward(self):

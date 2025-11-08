@@ -5,16 +5,13 @@ import torch
 import torch.nn
 import argparse
 from PIL import Image
-from torch.utils.tensorboard import SummaryWriter  # ✅ use built-in PyTorch version
+from torch.utils.tensorboard import SummaryWriter
 
 from validate import validate
 from data import create_dataloader
 from earlystop import EarlyStopping
 from networks.FrequencyModels.WaveletsPacketsScratch_128.Trainer_WaveletsPacketsScratch_128 import WolterWaveletPacketTrainer
 from options.train_options import TrainOptions
-
-
-"""Currently assumes jpg_prob, blur_prob 0 or 1"""
 
 
 def get_val_opt():
@@ -25,6 +22,9 @@ def get_val_opt():
     val_opt.no_crop = False
     val_opt.serial_batches = True
     val_opt.jpg_method = ['pil']
+
+    # ✅ Ensure wavelet computation is enabled for validation
+    val_opt.compute_wavelets = True
 
     # handle blur/jpg options properly
     if len(val_opt.blur_sig) == 2:
@@ -40,11 +40,29 @@ def get_val_opt():
 if __name__ == "__main__":
     opt = TrainOptions().parse()
     opt.dataroot = f"{opt.dataroot}/{opt.train_split}/"
+
+    # ✅ Enable wavelet computation in dataloader
+    opt.compute_wavelets = True
+
     val_opt = get_val_opt()
 
+    print("=" * 80)
+    print("🔬 WAVELET-PACKET DEEPFAKE DETECTION TRAINING")
+    print("=" * 80)
+    print(f"📊 Dataset: {opt.dataroot}")
+    print(
+        f"🌊 Wavelet: {getattr(opt, 'wavelet_type', 'haar')}, Level: {getattr(opt, 'wavelet_level', 3)}")
+    print(f"💾 Log scaling: {getattr(opt, 'use_log_packets', True)}")
+    print(
+        f"👷 DataLoader workers: {opt.num_threads} (parallel wavelet computation)")
+    print(f"🎯 Batch size: {opt.batch_size}")
+    print("=" * 80)
+
+    # Create dataloader with parallel wavelet computation
     data_loader = create_dataloader(opt)
     dataset_size = len(data_loader)
-    print(f"# training images = {dataset_size}")
+    print(f"# training images = {dataset_size * opt.batch_size}")
+    print(f"# training batches = {dataset_size}")
 
     # ✅ create TensorBoard log directories (train & val)
     train_logdir = os.path.join(opt.checkpoints_dir, opt.name, "train")
@@ -55,10 +73,15 @@ if __name__ == "__main__":
     train_writer = SummaryWriter(train_logdir)
     val_writer = SummaryWriter(val_logdir)
 
+    # Create model
     model = WolterWaveletPacketTrainer(opt)
+
     early_stopping = EarlyStopping(
         patience=opt.earlystop_epoch, delta=-0.001, verbose=True
     )
+
+    print("\n🚀 Starting training...")
+    print("-" * 80)
 
     for epoch in range(opt.niter):
         epoch_start_time = time.time()
@@ -68,6 +91,8 @@ if __name__ == "__main__":
             model.total_steps += 1
             epoch_iter += opt.batch_size
 
+            # ✅ Data is already wavelet packets from dataloader!
+            # set_input just transfers to GPU (fast!)
             model.set_input(data)
             model.optimize_parameters()
 
@@ -86,12 +111,12 @@ if __name__ == "__main__":
                 model.save_networks("latest")
 
                 model.eval()
-                # ✅ Pass trainer (now callable)
+                # ✅ Pass trainer object (callable via __call__)
                 acc, ap = validate(model, val_opt)[:2]
                 val_writer.add_scalar("accuracy", acc, model.total_steps)
                 val_writer.add_scalar("ap", ap, model.total_steps)
                 print(f"(Val @ epoch {epoch}) acc: {acc:.4f}; ap: {ap:.4f}")
-                model.train()  # ✅ Now this works
+                model.train()
 
         # ✅ End of epoch save
         if epoch % opt.save_epoch_freq == 0:
@@ -100,14 +125,15 @@ if __name__ == "__main__":
             model.save_networks("latest")
             model.save_networks(epoch)
 
-            # ✅ Validation after each epoch
-            model.eval()
-            # ✅ Pass trainer (now callable)
-            acc, ap = validate(model, val_opt)[:2]
-            val_writer.add_scalar("accuracy", acc, model.total_steps)
-            val_writer.add_scalar("ap", ap, model.total_steps)
-            print(f"(Val @ epoch {epoch}) acc: {acc:.4f}; ap: {ap:.4f}")
-            model.train()  # ✅ Now this works
+        # ✅ Validation after each epoch
+        model.eval()
+        acc, ap = validate(model, val_opt)[:2]
+        val_writer.add_scalar("accuracy", acc, model.total_steps)
+        val_writer.add_scalar("ap", ap, model.total_steps)
+
+        epoch_time = time.time() - epoch_start_time
+        print(
+            f"(Val @ epoch {epoch}) acc: {acc:.4f}; ap: {ap:.4f} | Time: {epoch_time:.2f}s")
 
         # ✅ Early stopping logic
         early_stopping(acc, model)
@@ -128,9 +154,13 @@ if __name__ == "__main__":
     train_writer.close()
     val_writer.close()
 
-    print(f"\n✅ Training finished. TensorBoard logs saved in:")
-    print(f"   - {train_logdir}")
-    print(f"   - {val_logdir}")
-    print("You can now open TensorBoard anytime with:")
+    print("\n" + "=" * 80)
+    print("✅ Training finished successfully!")
+    print("=" * 80)
+    print(f"📁 TensorBoard logs saved in:")
+    print(f"   - Training: {train_logdir}")
+    print(f"   - Validation: {val_logdir}")
+    print(f"\n📊 View logs with:")
     print(
         f"   tensorboard --logdir {os.path.join(opt.checkpoints_dir, opt.name)}")
+    print("=" * 80)
