@@ -263,7 +263,8 @@ class WaveletBinaryDataset(datasets.ImageFolder):
         img = self.loader(path)
 
         # Apply augmentations (resize, crop, flip, blur, jpeg)
-        img = self.transform(img)
+        if self.image_transform is not None:  # ✅ Check if not None
+            img = self.image_transform(img)   # ✅ Use self.image_transform
 
         if self.compute_wavelets:
             # ✅ Compute wavelet packets (runs in DataLoader worker - CPU, parallelized!)
