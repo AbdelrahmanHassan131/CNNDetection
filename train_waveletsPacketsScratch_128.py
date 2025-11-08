@@ -117,13 +117,13 @@ if __name__ == "__main__":
                 )
                 model.save_networks("latest")
 
-                model.eval()
-                # ✅ Pass trainer object (callable via __call__)
-                acc, ap = validate(model, val_opt)[:2]
-                val_writer.add_scalar("accuracy", acc, model.total_steps)
-                val_writer.add_scalar("ap", ap, model.total_steps)
-                print(f"(Val @ epoch {epoch}) acc: {acc:.4f}; ap: {ap:.4f}")
-                model.train()
+                # model.eval()
+                # # ✅ Pass trainer object (callable via __call__)
+                # acc, ap = validate(model, val_opt)[:2]
+                # val_writer.add_scalar("accuracy", acc, model.total_steps)
+                # val_writer.add_scalar("ap", ap, model.total_steps)
+                # print(f"(Val @ epoch {epoch}) acc: {acc:.4f}; ap: {ap:.4f}")
+                # model.train()
 
         # ✅ End of epoch save
         if epoch % opt.save_epoch_freq == 0:
