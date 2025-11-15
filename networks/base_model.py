@@ -13,7 +13,9 @@ class BaseModel(nn.Module):
         self.total_steps = 0
         self.isTrain = opt.isTrain
         self.save_dir = os.path.join(opt.checkpoints_dir, opt.name)
-        self.device = torch.device('cuda:{}'.format(opt.gpu_ids[0])) if opt.gpu_ids else torch.device('cpu')
+        self.device = torch.device('cuda:{}'.format(
+            opt.gpu_ids[0])) if opt.gpu_ids else torch.device('cpu')
+        print("used device is ",  self.device)
 
     def save_networks(self, epoch):
         save_filename = 'model_epoch_%s.pth' % epoch
@@ -22,8 +24,8 @@ class BaseModel(nn.Module):
         # serialize model and optimizer to dict
         state_dict = {
             'model': self.model.state_dict(),
-            'optimizer' : self.optimizer.state_dict(),
-            'total_steps' : self.total_steps,
+            'optimizer': self.optimizer.state_dict(),
+            'total_steps': self.total_steps,
         }
 
         torch.save(state_dict, save_path)
@@ -45,7 +47,7 @@ class BaseModel(nn.Module):
 
         if self.isTrain and not self.opt.new_optim:
             self.optimizer.load_state_dict(state_dict['optimizer'])
-            ### move optimizer state to GPU
+            # move optimizer state to GPU
             for state in self.optimizer.state.values():
                 for k, v in state.items():
                     if torch.is_tensor(v):
@@ -75,7 +77,8 @@ def init_weights(net, init_type='normal', gain=0.02):
             elif init_type == 'orthogonal':
                 init.orthogonal_(m.weight.data, gain=gain)
             else:
-                raise NotImplementedError('initialization method [%s] is not implemented' % init_type)
+                raise NotImplementedError(
+                    'initialization method [%s] is not implemented' % init_type)
             if hasattr(m, 'bias') and m.bias is not None:
                 init.constant_(m.bias.data, 0.0)
         elif classname.find('BatchNorm2d') != -1:

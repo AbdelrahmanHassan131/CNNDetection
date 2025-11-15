@@ -44,6 +44,10 @@ class BaseOptions():
                             type=int, help='# threads for loading data')
         parser.add_argument('--checkpoints_dir', type=str,
                             default='./checkpoints', help='models are saved here')
+        parser.add_argument('--rgb_model_path', type=str,
+                            default='./checkpoints', help='models are saved here')
+        parser.add_argument('--wavelet_model_path', type=str,
+                            default='./checkpoints', help='models are saved here')
         parser.add_argument('--serial_batches', action='store_true',
                             help='if true, takes images in order to make batches, otherwise takes them randomly')
         parser.add_argument('--resize_or_crop', type=str, default='scale_and_crop',

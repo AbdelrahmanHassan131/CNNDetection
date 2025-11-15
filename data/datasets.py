@@ -292,3 +292,167 @@ class WaveletBinaryDataset(datasets.ImageFolder):
             )(sample)
 
         return sample, target
+
+
+class DualInputDataset(datasets.ImageFolder):
+    """
+    Dataset that returns both RGB images and Wavelet packets.
+    Used for MHA Fusion model training/validation.
+
+    Returns: (rgb_tensor, wavelet_tensor, label)
+        - rgb_tensor: [3, H, W] - normalized RGB image
+        - wavelet_tensor: [192, H', W'] - wavelet packet coefficients
+        - label: int (0 or 1)
+    """
+
+    def __init__(self, opt, root):
+        self.opt = opt
+
+        # Wavelet parameters
+        self.wavelet_type = getattr(opt, 'wavelet_type', 'haar')
+        self.wavelet_level = getattr(opt, 'wavelet_level', 3)
+        self.wavelet_mode = getattr(opt, 'wavelet_mode', 'reflect')
+        self.use_log_packets = getattr(opt, 'use_log_packets', True)
+
+        # Build transforms for RGB images
+        if opt.isTrain:
+            crop_func = transforms.RandomCrop(opt.cropSize)
+        elif opt.no_crop:
+            crop_func = transforms.Lambda(lambda img: img)
+        else:
+            crop_func = transforms.CenterCrop(opt.cropSize)
+
+        if opt.isTrain and not opt.no_flip:
+            flip_func = transforms.RandomHorizontalFlip()
+        else:
+            flip_func = transforms.Lambda(lambda img: img)
+
+        if not opt.isTrain and opt.no_resize:
+            rz_func = transforms.Lambda(lambda img: img)
+        else:
+            rz_func = transforms.Lambda(lambda img: custom_resize(img, opt))
+
+        # Image transforms (augmentation)
+        self.image_transform = transforms.Compose([
+            rz_func,
+            transforms.Lambda(lambda img: data_augment(img, opt)),
+            crop_func,
+            flip_func,
+        ])
+
+        # RGB normalization (for Wang2020 model)
+        self.rgb_normalize = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            )
+        ])
+
+        # Initialize ImageFolder
+        super().__init__(root, transform=None)
+
+    def __getitem__(self, index):
+        """
+        Load and process a single sample.
+
+        Returns:
+            tuple: (rgb_tensor, wavelet_tensor, label)
+        """
+        path, target = self.samples[index]
+
+        # Load image
+        img = self.loader(path)
+
+        # Apply augmentations (same for both RGB and wavelet)
+        if self.image_transform is not None:
+            img = self.image_transform(img)
+
+        # === Process RGB image (for Wang2020 model) ===
+        rgb_tensor = self.rgb_normalize(img)
+
+        # === Process Wavelet packets (for Wolter2022 model) ===
+        img_array = np.array(img)
+
+        wavelet_coeffs = compute_wavelet_packet_coeffs(
+            img_array,
+            wavelet=self.wavelet_type,
+            level=self.wavelet_level,
+            mode=self.wavelet_mode
+        )
+
+        if self.use_log_packets:
+            wavelet_coeffs = log_scale_packets(wavelet_coeffs)
+
+        wavelet_tensor = torch.from_numpy(wavelet_coeffs).float()
+
+        return rgb_tensor, wavelet_tensor, target
+
+
+# ===========================
+# Helper Functions (should already exist in your datasets.py)
+# ===========================
+
+def compute_wavelet_packet_coeffs(img, wavelet='haar', level=3, mode='reflect'):
+    """
+    Compute wavelet packet coefficients for an RGB image.
+    (Should already exist in your datasets.py)
+    """
+    if torch.is_tensor(img):
+        img = img.cpu().numpy()
+
+    if img.ndim == 3 and img.shape[0] == 3:
+        img = img.transpose(1, 2, 0)
+
+    H, W, _ = img.shape
+    all_packets = []
+
+    def get_paths(level):
+        if level == 0:
+            return ['']
+        paths = []
+        prev_paths = get_paths(level - 1)
+        for path in prev_paths:
+            for letter in ['a', 'h', 'v', 'd']:
+                paths.append(path + letter)
+        return paths
+
+    packet_paths = get_paths(level)
+
+    for c in range(3):
+        channel = img[:, :, c]
+        wp = pywt.WaveletPacket2D(
+            data=channel, wavelet=wavelet, mode=mode, maxlevel=level)
+
+        for path in packet_paths:
+            coeff = wp[path].data
+            all_packets.append(coeff)
+
+    all_packets = np.array(all_packets, dtype=np.float32)
+    return all_packets
+
+
+def log_scale_packets(packets, epsilon=1e-10):
+    """
+    Apply log-scaling to packet coefficients.
+    (Should already exist in your datasets.py)
+    """
+    return np.sign(packets) * np.log(np.abs(packets) + epsilon)
+
+
+# def data_augment(img, opt):
+#     """
+#     Data augmentation (blur, jpeg compression).
+#     (Should already exist in your datasets.py)
+#     """
+#     # Your existing implementation
+#     pass
+
+
+# def custom_resize(img, opt):
+#     """
+#     Custom resize function.
+#     (Should already exist in your datasets.py)
+#     """
+#     # Your existing implementation
+#     pass
