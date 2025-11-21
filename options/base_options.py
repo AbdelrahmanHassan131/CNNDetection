@@ -40,7 +40,7 @@ class BaseOptions():
                             help='name of the experiment. It decides where to store samples and models')
         parser.add_argument('--epoch', type=str, default='latest',
                             help='which epoch to load? set to latest to use latest cached model')
-        parser.add_argument('--num_threads', default=4,
+        parser.add_argument('--num_threads', default=0,
                             type=int, help='# threads for loading data')
         parser.add_argument('--checkpoints_dir', type=str,
                             default='./checkpoints', help='models are saved here')
