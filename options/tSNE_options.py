@@ -31,10 +31,11 @@ class tSNE_Options(BaseOptions):
                             help='Number of t-SNE iterations')
         parser.add_argument('--num_samples', type=int, default=None,
                             help='Maximum number of samples to use (None for all)')
-
         # Output parameters
         parser.add_argument('--output_dir', type=str, default='tsne_outputs',
                             help='Directory to save the t-SNE plots')
+        parser.add_argument('--num_images', type=int, default=2,
+                            help='Number of images per category')
 
         self.isTrain = False
         return parser
