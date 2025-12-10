@@ -6,18 +6,19 @@ from .datasets import dataset_folder
 
 
 def get_dataset(opt):
-    dset_lst = []
-    for cls in opt.classes:
-        root = opt.dataroot + '/' + cls
-        dset = dataset_folder(opt, root)
-        dset_lst.append(dset)
-    return torch.utils.data.ConcatDataset(dset_lst)
+    """Create dataset from directory structure with fake and real folders"""
+    from .datasets import binary_dataset
+    # Use binary_dataset directly on dataroot
+    # ImageFolder will automatically find 'fake' and 'real' folders
+    # and assign labels alphabetically: fake=0, real=1
+    dset = binary_dataset(opt, opt.dataroot)
+    return dset
 
 
 def get_bal_sampler(dataset):
-    targets = []
-    for d in dataset.datasets:
-        targets.extend(d.targets)
+    """Create balanced sampler for imbalanced datasets"""
+    # Get targets directly from the dataset (ImageFolder has .targets attribute)
+    targets = dataset.targets
 
     ratio = np.bincount(targets)
     w = 1. / torch.tensor(ratio, dtype=torch.float)
@@ -36,5 +37,5 @@ def create_dataloader(opt):
                                               batch_size=opt.batch_size,
                                               shuffle=shuffle,
                                               sampler=sampler,
-                                              num_workers=int(opt.num_threads))
+                                              num_workers=0)  # Set to 0 to avoid pickle errors on Windows
     return data_loader
