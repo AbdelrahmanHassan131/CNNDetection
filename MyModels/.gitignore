@@ -1,0 +1,9 @@
+dataset/train/fake/*
+dataset/train/real/*
+dataset/val/fake/*
+dataset/val/real/*
+__pycache__/
+*.pth
+*.tfevents.*
+opt.txt
+!4-classes-freqnet-v2.pth
