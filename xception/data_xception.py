@@ -1,181 +1,151 @@
 """
-Data loading for Xception model with specific normalization and transforms
-- Resize: 333
-- Crop: 299
-- Normalize: mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]
+Simple data loader for Xception model evaluation
+Only handles basic image loading and resizing - no augmentation
 """
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-import numpy as np
-from torch.utils.data.sampler import WeightedRandomSampler
-import torchvision.datasets as datasets
-import torchvision.transforms as transforms
-import torchvision.transforms.functional as TF
+from torchvision import datasets, transforms
 from PIL import Image
-from random import random, choice
-from io import BytesIO
-from scipy.ndimage.filters import gaussian_filter
 
 
-# Xception-specific normalization
-XCEPTION_MEAN = [0.5, 0.5, 0.5]
-XCEPTION_STD = [0.5, 0.5, 0.5]
-
-
-def get_dataset_xception(opt):
-    """Create dataset from directory structure"""
-    dset_lst = []
-    for cls in opt.classes:
-        root = opt.dataroot + '/' + cls
-        dset = binary_dataset_xception(opt, root)
-        dset_lst.append(dset)
-    return torch.utils.data.ConcatDataset(dset_lst)
-
-
-def binary_dataset_xception(opt, root):
-    """Create binary classification dataset with Xception transforms"""
+def create_xception_dataloader(dataroot, batch_size=32, num_workers=0, shuffle=False):
+    """
+    Create a simple dataloader for Xception evaluation.
     
-    # Cropping - 299x299 for Xception
-    if opt.isTrain:
-        crop_func = transforms.RandomCrop(opt.cropSize)
-    elif opt.no_crop:
-        crop_func = transforms.Lambda(lambda img: img)
-    else:
-        crop_func = transforms.CenterCrop(opt.cropSize)
-
-    # Flipping
-    if opt.isTrain and not opt.no_flip:
-        flip_func = transforms.RandomHorizontalFlip()
-    else:
-        flip_func = transforms.Lambda(lambda img: img)
-        
-    # Resizing - 333 for Xception
-    if not opt.isTrain and opt.no_resize:
-        rz_func = transforms.Lambda(lambda img: img)
-    else:
-        rz_func = transforms.Lambda(lambda img: custom_resize(img, opt))
-
-    # Use Xception-specific normalization
-    normalize = transforms.Normalize(mean=XCEPTION_MEAN, std=XCEPTION_STD)
-
-    dset = datasets.ImageFolder(
-        root,
-        transforms.Compose([
-            rz_func,
-            transforms.Lambda(lambda img: data_augment(img, opt)),
-            crop_func,
-            flip_func,
-            transforms.ToTensor(),
-            normalize,
-        ])
+    Args:
+        dataroot: Path to dataset with 'fake' and 'real' subfolders
+        batch_size: Batch size for evaluation
+        num_workers: Number of worker threads (0 for Windows to avoid pickle errors)
+        shuffle: Whether to shuffle data (False for evaluation)
+    
+    Returns:
+        DataLoader with (images, labels) where labels are 0=fake, 1=real
+    """
+    
+    # Xception-specific transforms
+    # Resize to 333, center crop to 299, normalize with mean/std of 0.5
+    transform = transforms.Compose([
+        transforms.Resize(333),
+        transforms.CenterCrop(299),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
+    
+    # Create dataset using ImageFolder
+    # Expects structure: dataroot/fake/*.jpg, dataroot/real/*.jpg
+    # Labels: fake=0, real=1 (alphabetical order)
+    dataset = datasets.ImageFolder(
+        root=dataroot,
+        transform=transform,
+        loader=lambda path: Image.open(path).convert('RGB')
     )
-    return dset
-
-
-def data_augment(img, opt):
-    img = np.array(img)
-
-    if random() < opt.blur_prob:
-        sig = sample_continuous(opt.blur_sig)
-        gaussian_blur(img, sig)
-
-    if random() < opt.jpg_prob:
-        method = sample_discrete(opt.jpg_method)
-        qual = sample_discrete(opt.jpg_qual)
-        img = jpeg_from_key(img, qual, method)
-
-    return Image.fromarray(img)
-
-
-def sample_continuous(s):
-    if len(s) == 1:
-        return s[0]
-    if len(s) == 2:
-        rg = s[1] - s[0]
-        return random() * rg + s[0]
-    raise ValueError("Length of iterable s should be 1 or 2.")
-
-
-def sample_discrete(s):
-    if len(s) == 1:
-        return s[0]
-    return choice(s)
-
-
-def gaussian_blur(img, sigma):
-    gaussian_filter(img[:,:,0], output=img[:,:,0], sigma=sigma)
-    gaussian_filter(img[:,:,1], output=img[:,:,1], sigma=sigma)
-    gaussian_filter(img[:,:,2], output=img[:,:,2], sigma=sigma)
-
-
-def cv2_jpg(img, compress_val):
-    import cv2
-    img_cv2 = img[:,:,::-1]
-    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), compress_val]
-    result, encimg = cv2.imencode('.jpg', img_cv2, encode_param)
-    decimg = cv2.imdecode(encimg, 1)
-    return decimg[:,:,::-1]
-
-
-def pil_jpg(img, compress_val):
-    out = BytesIO()
-    img = Image.fromarray(img)
-    img.save(out, format='jpeg', quality=compress_val)
-    img = Image.open(out)
-    img = np.array(img)
-    out.close()
-    return img
-
-
-jpeg_dict = {'cv2': cv2_jpg, 'pil': pil_jpg}
-def jpeg_from_key(img, compress_val, key):
-    method = jpeg_dict[key]
-    return method(img, compress_val)
-
-
-rz_dict = {
-    'bilinear': Image.BILINEAR,
-    'bicubic': Image.BICUBIC,
-    'lanczos': Image.LANCZOS,
-    'nearest': Image.NEAREST
-}
-
-def custom_resize(img, opt):
-    interp = sample_discrete(opt.rz_interp)
-    return TF.resize(img, opt.loadSize, interpolation=rz_dict[interp])
-
-
-def get_bal_sampler(dataset):
-    """Create balanced sampler for imbalanced datasets"""
-    targets = []
-    for d in dataset.datasets:
-        targets.extend(d.targets)
-
-    ratio = np.bincount(targets)
-    w = 1. / torch.tensor(ratio, dtype=torch.float)
-    sample_weights = w[targets]
-    sampler = WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(sample_weights)
+    
+    # Create dataloader
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=True if torch.cuda.is_available() else False
     )
-    return sampler
+    
+    return dataloader
 
 
 def create_dataloader_xception(opt):
-    """Create dataloader for Xception"""
-    shuffle = not opt.serial_batches if (opt.isTrain and not opt.class_bal) else False
-    dataset = get_dataset_xception(opt)
-    sampler = get_bal_sampler(dataset) if opt.class_bal else None
-
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=opt.batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        num_workers=int(opt.num_threads)
+    """
+    Create dataloader for Xception using options object (for training script compatibility).
+    
+    Args:
+        opt: Options object with attributes:
+            - dataroot: Path to dataset
+            - batch_size: Batch size
+            - num_threads: Number of workers
+            - serial_batches: Whether to use sequential loading (no shuffle if True)
+            
+    Returns:
+        DataLoader with (images, labels)
+    """
+    shuffle = not opt.serial_batches if hasattr(opt, 'serial_batches') else True
+    num_workers = opt.num_threads if hasattr(opt, 'num_threads') else 0
+    batch_size = opt.batch_size if hasattr(opt, 'batch_size') else 32
+    
+    return create_xception_dataloader(
+        dataroot=opt.dataroot,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=shuffle
     )
-    return data_loader
+
+
+def get_dataset_info(dataroot):
+    """
+    Get information about the dataset.
+    
+    Args:
+        dataroot: Path to dataset
+        
+    Returns:
+        Dictionary with dataset statistics
+    """
+    dataset = datasets.ImageFolder(root=dataroot)
+    
+    info = {
+        'total_samples': len(dataset),
+        'num_classes': len(dataset.classes),
+        'classes': dataset.classes,
+        'class_to_idx': dataset.class_to_idx,
+        'samples_per_class': {}
+    }
+    
+    # Count samples per class
+    for class_name in dataset.classes:
+        class_idx = dataset.class_to_idx[class_name]
+        count = sum(1 for _, label in dataset.samples if label == class_idx)
+        info['samples_per_class'][class_name] = count
+    
+    return info
+
+
+if __name__ == '__main__':
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Test Xception dataloader')
+    parser.add_argument('--dataroot', type=str, required=True,
+                       help='Path to validation dataset (containing fake and real folders)')
+    parser.add_argument('--batch_size', type=int, default=32,
+                       help='Batch size for loading')
+    parser.add_argument('--num_workers', type=int, default=0,
+                       help='Number of worker threads (use 0 for Windows)')
+    
+    args = parser.parse_args()
+    
+    # Get dataset info
+    print("Loading dataset information...")
+    info = get_dataset_info(args.dataroot)
+    print("\nDataset Information:")
+    print(f"  Total samples: {info['total_samples']}")
+    print(f"  Classes: {info['classes']}")
+    print(f"  Class mapping: {info['class_to_idx']}")
+    print(f"  Samples per class:")
+    for class_name, count in info['samples_per_class'].items():
+        print(f"    {class_name}: {count}")
+    
+    # Create dataloader
+    print(f"\nCreating dataloader...")
+    dataloader = create_xception_dataloader(
+        dataroot=args.dataroot,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers
+    )
+    print(f"DataLoader created with {len(dataloader)} batches")
+    
+    # Test loading one batch
+    print(f"\nTesting batch loading...")
+    images, labels = next(iter(dataloader))
+    print(f"  Batch image shape: {images.shape}")
+    print(f"  Batch labels shape: {labels.shape}")
+    print(f"  Image value range: [{images.min():.3f}, {images.max():.3f}]")
+    print(f"  Unique labels in batch: {labels.unique().tolist()}")
+    print("\n✅ Dataloader test successful!")
+
