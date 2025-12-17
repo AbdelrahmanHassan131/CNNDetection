@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from torch.utils.tensorboard import SummaryWriter
 
-from validate import validate
+from WaveletsRawModelRawInput.validate_wavelet import validate_wavelet
 from earlystop import EarlyStopping
 from WaveletsRawModelRawInput.trainer_WaveletsRawModelRawInput import WaveletPacketTrainer
 from WaveletsRawModelRawInput.data_wavelets import create_dataloader_wavelet
@@ -108,7 +108,7 @@ if __name__ == '__main__':
         
         # Validation
         model.eval()
-        acc, ap = validate(model.model, val_opt)[:2]
+        acc, ap = validate_wavelet(model.model, val_opt)[:2]
         val_writer.add_scalar('accuracy', acc, model.total_steps)
         val_writer.add_scalar('ap', ap, model.total_steps)
         print("(Val @ epoch {}) acc: {}; ap: {}".format(epoch, acc, ap))
